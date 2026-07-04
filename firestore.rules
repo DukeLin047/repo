@@ -1,4 +1,4 @@
-rules_version = '2';
+rules_version = '2'; 
 service cloud.firestore {
   match /databases/{database}/documents {
     // 店家/菜單: 任何人可讀(機器人跟管理後台都要讀),僅登入的管理員可寫
