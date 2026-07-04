@@ -197,4 +197,4 @@ async function handleEvent(event) {
   if (text === "附近" || text === "附近店家") {
     if (event.replyToken) {
       await replyMessage(event.replyToken, [
-        textMsg("請傳送你的目前位置給
+          textMsg("Please share your current location 📍"),
