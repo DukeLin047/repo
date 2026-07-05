@@ -28,7 +28,7 @@ function verifySignature(rawBody, signature) {
 }
 
 async function replyMessage(replyToken, messages) {
-  await fetch(LINE_API, {
+  const res = await fetch(LINE_API, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -36,10 +36,14 @@ async function replyMessage(replyToken, messages) {
     },
     body: JSON.stringify({ replyToken: replyToken, messages: messages }),
   });
+  if (!res.ok) {
+    const errText = await res.text();
+    console.error("LINE reply failed: " + res.status + " " + errText);
+  }
 }
 
 async function pushMessage(to, messages) {
-  await fetch(LINE_PUSH_API, {
+  const res = await fetch(LINE_PUSH_API, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -47,6 +51,10 @@ async function pushMessage(to, messages) {
     },
     body: JSON.stringify({ to: to, messages: messages }),
   });
+  if (!res.ok) {
+    const errText = await res.text();
+    console.error("LINE push failed: " + res.status + " " + errText);
+  }
 }
 
 async function getDisplayName(groupId, userId) {
