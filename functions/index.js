@@ -1,8 +1,3 @@
-// ============================================================
-// 手搖飲揪團機器人 - Cloud Functions 後端
-// 功能: LINE Webhook 接收群組訊息 / 開團 / 點餐 / 結單分帳 / 附近店家搜尋
-// ============================================================
-
 const { onRequest } = require("firebase-functions/v2/https");
 const admin = require("firebase-admin");
 const crypto = require("crypto");
