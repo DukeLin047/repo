@@ -103,7 +103,7 @@ async function handleEvent(event) {
     if (event.replyToken) {
       await replyMessage(event.replyToken, [
         textMsg(
-          "哈囉!我是聲寶庫存查詢小幫手。\n\n輸入「查」加型號即可查詢庫存,例如:\n查QM-98MI5200"
+          "哈囉!我是聲寶庫存查詢小幫手。\n\n輸入「查」加型號即可查詢庫存,例如:\n查QM-98MI5200\n\n輸入「列表」加關鍵字可查詢多筆型號,例如:\n列表冷氣"
         ),
       ]);
     }
@@ -137,12 +137,30 @@ async function handleEvent(event) {
       return;
     }
 
-    const shown = matches.slice(0, 30);
-    const lines = shown.map(function (it) {
+    const lines = matches.map(function (it) {
       return it.model + "：" + it.stock;
     });
-    let msg = "找到 " + matches.length + " 筆" + (matches.length > 30 ? "(顯示前30筆)" : "") + "\n\n" + lines.join("\n");
-    await replyMessage(event.replyToken, [textMsg(msg)]);
+
+    const chunkSize = 40;
+    const chunks = [];
+    for (let i = 0; i < lines.length; i += chunkSize) {
+      chunks.push(lines.slice(i, i + chunkSize));
+    }
+
+    const limitedChunks = chunks.slice(0, 5);
+    const messages = limitedChunks.map(function (chunk, idx) {
+      const header =
+        "找到 " +
+        matches.length +
+        " 筆" +
+        (chunks.length > 1
+          ? "（" + (idx + 1) + "/" + limitedChunks.length + "）"
+          : "") +
+        "\n\n";
+      return textMsg(header + chunk.join("\n"));
+    });
+
+    await replyMessage(event.replyToken, messages);
     return;
   }
 
