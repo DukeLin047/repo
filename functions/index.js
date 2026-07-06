@@ -46,19 +46,22 @@ function textMsg(text) {
 
 async function queryStock(modelRaw) {
   const model = modelRaw.trim().toUpperCase();
-  const snap = await sampoDb.collection("dealerStock").get();
-  let total = 0;
-  let dealerCount = 0;
-  snap.forEach(function (doc) {
-    const data = doc.data();
-    const stock = data.stock || {};
-    const qty = stock[model];
-    if (typeof qty === "number" && qty > 0) {
-      total += qty;
-      dealerCount += 1;
-    }
+  const doc = await sampoDb.collection("inventory").doc("current").get();
+
+  if (!doc.exists) {
+    return { model: model, found: false, stock: 0 };
+  }
+
+  const items = doc.data().items || [];
+  const match = items.find(function (it) {
+    return String(it.model).trim().toUpperCase() === model;
   });
-  return { model: model, total: total, dealerCount: dealerCount };
+
+  if (!match) {
+    return { model: model, found: false, stock: 0 };
+  }
+
+  return { model: model, found: true, stock: match.stock };
 }
 
 exports.lineWebhook = onRequest({ region: "asia-east1" }, async (req, res) => {
@@ -118,15 +121,13 @@ async function handleEvent(event) {
 
     if (!event.replyToken) return;
 
-    if (result.total > 0) {
+    if (!result.found) {
       await replyMessage(event.replyToken, [
-        textMsg(
-          result.model +
-            " 目前有貨\n總庫存量:" +
-            result.total +
-            "\n經銷商家數:" +
-            result.dealerCount
-        ),
+        textMsg(result.model + " 查無此型號,請確認型號是否正確"),
+      ]);
+    } else if (result.stock > 0) {
+      await replyMessage(event.replyToken, [
+        textMsg(result.model + " 目前有貨\n庫存量:" + result.stock),
       ]);
     } else {
       await replyMessage(event.replyToken, [textMsg(result.model + " 目前無貨")]);
