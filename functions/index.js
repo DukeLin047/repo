@@ -44,15 +44,15 @@ function textMsg(text) {
   return { type: "text", text: text };
 }
 
+async function getItems() {
+  const doc = await sampoDb.collection("inventory").doc("current").get();
+  if (!doc.exists) return [];
+  return doc.data().items || [];
+}
+
 async function queryStock(modelRaw) {
   const model = modelRaw.trim().toUpperCase();
-  const doc = await sampoDb.collection("inventory").doc("current").get();
-
-  if (!doc.exists) {
-    return { model: model, found: false, stock: 0 };
-  }
-
-  const items = doc.data().items || [];
+  const items = await getItems();
   const match = items.find(function (it) {
     return String(it.model).trim().toUpperCase() === model;
   });
@@ -62,6 +62,15 @@ async function queryStock(modelRaw) {
   }
 
   return { model: model, found: true, stock: match.stock };
+}
+
+async function listModels(keywordRaw) {
+  const keyword = keywordRaw.trim().toUpperCase();
+  const items = await getItems();
+  const matches = items.filter(function (it) {
+    return String(it.model).trim().toUpperCase().indexOf(keyword) !== -1;
+  });
+  return matches;
 }
 
 exports.lineWebhook = onRequest({ region: "asia-east1" }, async (req, res) => {
@@ -104,6 +113,38 @@ async function handleEvent(event) {
   if (event.type !== "message" || event.message.type !== "text") return;
 
   const text = event.message.text.trim();
+
+  if (text.indexOf("列表") === 0) {
+    const keyword = text.slice(2).trim();
+
+    if (!keyword) {
+      if (event.replyToken) {
+        await replyMessage(event.replyToken, [
+          textMsg("請在「列表」後面接關鍵字,例如:列表冷氣 或 列表AW"),
+        ]);
+      }
+      return;
+    }
+
+    const matches = await listModels(keyword);
+
+    if (!event.replyToken) return;
+
+    if (matches.length === 0) {
+      await replyMessage(event.replyToken, [
+        textMsg("找不到包含「" + keyword + "」的型號"),
+      ]);
+      return;
+    }
+
+    const shown = matches.slice(0, 30);
+    const lines = shown.map(function (it) {
+      return it.model + "：" + it.stock;
+    });
+    let msg = "找到 " + matches.length + " 筆" + (matches.length > 30 ? "(顯示前30筆)" : "") + "\n\n" + lines.join("\n");
+    await replyMessage(event.replyToken, [textMsg(msg)]);
+    return;
+  }
 
   if (text.charAt(0) === "查") {
     const modelRaw = text.slice(1).trim();
