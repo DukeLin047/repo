@@ -41,6 +41,24 @@ async function replyMessage(replyToken, messages) {
   }
 }
 
+async function leaveGroup(groupId) {
+  try {
+    const res = await fetch(
+      "https://api.line.me/v2/bot/group/" + groupId + "/leave",
+      {
+        method: "POST",
+        headers: { Authorization: "Bearer " + LINE_CHANNEL_ACCESS_TOKEN },
+      }
+    );
+    if (!res.ok) {
+      const errText = await res.text();
+      console.error("Leave group failed: " + res.status + " " + errText);
+    }
+  } catch (e) {
+    console.error("Leave group error:", e);
+  }
+}
+
 async function getDisplayName(groupId, userId) {
   if (!groupId || !userId) return null;
   try {
@@ -53,6 +71,17 @@ async function getDisplayName(groupId, userId) {
     return data.displayName || null;
   } catch (e) {
     return null;
+  }
+}
+
+async function isGroupAllowed(groupId) {
+  if (!groupId) return false;
+  try {
+    const doc = await sampoDb.collection("allowedGroups").doc(groupId).get();
+    return doc.exists;
+  } catch (e) {
+    console.error("isGroupAllowed error:", e);
+    return false;
   }
 }
 
@@ -154,7 +183,17 @@ exports.lineWebhook = onRequest({ region: "asia-east1" }, async (req, res) => {
 });
 
 async function handleEvent(event) {
+  const groupId = event.source.type === "group" ? event.source.groupId : null;
+  const userId = event.source.userId;
+
   if (event.type === "join") {
+    if (groupId) {
+      const allowed = await isGroupAllowed(groupId);
+      if (!allowed) {
+        await leaveGroup(groupId);
+        return;
+      }
+    }
     if (event.replyToken) {
       await replyMessage(event.replyToken, [
         textMsg(
@@ -168,8 +207,28 @@ async function handleEvent(event) {
   if (event.type !== "message" || event.message.type !== "text") return;
 
   const text = event.message.text.trim();
-  const groupId = event.source.type === "group" ? event.source.groupId : null;
-  const userId = event.source.userId;
+
+  // 除錯用指令：不受白名單限制，方便取得 ID 來建立白名單
+  if (text === "groupid") {
+    if (event.replyToken) {
+      await replyMessage(event.replyToken, [
+        textMsg("這個群組的 ID：\n" + (groupId || "（不是群組，是個人對話）")),
+      ]);
+    }
+    return;
+  }
+
+  if (text === "myid") {
+    if (event.replyToken) {
+      await replyMessage(event.replyToken, [textMsg("你的使用者 ID：\n" + userId)]);
+    }
+    return;
+  }
+
+  // 其餘查詢指令：僅限白名單群組使用（私訊一律不回應）
+  if (!groupId) return;
+  const allowed = await isGroupAllowed(groupId);
+  if (!allowed) return;
 
   if (text.indexOf("功能列表") === 0) {
     const keyword = text.slice(4).trim();
