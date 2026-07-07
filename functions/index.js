@@ -187,15 +187,18 @@ async function handleEvent(event) {
 
     if (!event.replyToken) return;
 
+    const displayName = await getDisplayName(groupId, userId);
+    const namePrefix = displayName ? displayName + " ，你好！\n" : "";
+
     if (matches.length === 0) {
       await replyMessage(event.replyToken, [
-        textMsg("價格表資料裡找不到包含「" + keyword + "」的型號"),
+        textMsg(namePrefix + "價格表資料裡找不到包含「" + keyword + "」的型號"),
       ]);
       return;
     }
 
     await replyMessage(event.replyToken, [
-      textMsg("找到 " + matches.length + " 筆\n\n" + matches.slice(0, 40).join("\n")),
+      textMsg(namePrefix + "找到 " + matches.length + " 筆\n\n" + matches.slice(0, 40).join("\n")),
     ]);
     return;
   }
@@ -216,15 +219,15 @@ async function handleEvent(event) {
 
     if (!event.replyToken) return;
 
+    const displayName = await getDisplayName(groupId, userId);
+    const namePrefix = displayName ? displayName + " ，你好！\n\n" : "";
+
     if (matches.length === 0) {
       await replyMessage(event.replyToken, [
-        textMsg("找不到包含「" + keyword + "」的型號"),
+        textMsg(namePrefix + "找不到包含「" + keyword + "」的型號"),
       ]);
       return;
     }
-
-    const displayName = await getDisplayName(groupId, userId);
-    const namePrefix = displayName ? displayName + " 查詢\n\n" : "";
 
     const lines = matches.map(function (it) {
       return it.model + "：" + it.stock;
@@ -271,7 +274,7 @@ async function handleEvent(event) {
     if (!event.replyToken) return;
 
     const displayName = await getDisplayName(groupId, userId);
-    const namePrefix = displayName ? displayName + " 查詢\n" : "";
+    const namePrefix = displayName ? displayName + " ，你好！\n" : "";
 
     if (!result.found) {
       await replyMessage(event.replyToken, [
@@ -309,7 +312,7 @@ async function handleEvent(event) {
     if (!event.replyToken) return;
 
     const displayName = await getDisplayName(groupId, userId);
-    const namePrefix = displayName ? displayName + " 查詢\n" : "";
+    const namePrefix = displayName ? displayName + " ，你好！\n" : "";
     const warning = "\n\n※庫存10個以下需跟業務確認\n※無庫存也可以詢問業務";
 
     if (!result.found) {
