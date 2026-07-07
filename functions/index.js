@@ -101,10 +101,10 @@ async function queryFeatures(modelRaw) {
   for (let i = 0; i < sheets.length; i++) {
     const items = sheets[i].items || [];
     const match = items.find(function (it) {
-      return String(it.model).trim().toUpperCase() === model;
+      return String(it.model).trim().toUpperCase().indexOf(model) === 0;
     });
     if (match) {
-      return { model: model, found: true, specs: match.specs || [] };
+      return { model: match.model, found: true, specs: match.specs || [] };
     }
   }
 
