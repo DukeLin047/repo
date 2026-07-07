@@ -111,6 +111,23 @@ async function queryFeatures(modelRaw) {
   return { model: model, found: false, specs: [] };
 }
 
+async function listFeatureModels(keywordRaw) {
+  const keyword = keywordRaw.trim().toUpperCase();
+  const doc = await sampoDb.collection("priceList").doc("current").get();
+  if (!doc.exists) return [];
+
+  const sheets = doc.data().sheets || [];
+  const matches = [];
+  sheets.forEach(function (sheet) {
+    (sheet.items || []).forEach(function (it) {
+      if (String(it.model).trim().toUpperCase().indexOf(keyword) !== -1) {
+        matches.push(it.model);
+      }
+    });
+  });
+  return matches;
+}
+
 exports.lineWebhook = onRequest({ region: "asia-east1" }, async (req, res) => {
   const signature = req.headers["x-line-signature"];
   const rawBody = req.rawBody;
@@ -141,7 +158,7 @@ async function handleEvent(event) {
     if (event.replyToken) {
       await replyMessage(event.replyToken, [
         textMsg(
-          "哈囉!我是聲寶庫存查詢小幫手。\n\n輸入「查」加型號即可查詢庫存,例如:\n查QM-98MI5200\n\n輸入「查」加型號加「功能」可查詢規格,例如:\n查ES-B10F功能\n\n輸入「列表」加關鍵字可查詢多筆型號,例如:\n列表冷氣"
+          "哈囉!我是聲寶庫存查詢小幫手。\n\n輸入「查」加型號即可查詢庫存,例如:\n查QM-98MI5200\n\n輸入「查」加型號加「功能」可查詢規格,例如:\n查ES-B10F功能\n\n輸入「列表」加關鍵字可查詢多筆型號,例如:\n列表冷氣\n\n輸入「功能列表」加關鍵字可查詢價格表裡的型號,例如:\n功能列表EM-43"
         ),
       ]);
     }
@@ -153,6 +170,35 @@ async function handleEvent(event) {
   const text = event.message.text.trim();
   const groupId = event.source.type === "group" ? event.source.groupId : null;
   const userId = event.source.userId;
+
+  if (text.indexOf("功能列表") === 0) {
+    const keyword = text.slice(4).trim();
+
+    if (!keyword) {
+      if (event.replyToken) {
+        await replyMessage(event.replyToken, [
+          textMsg("請在「功能列表」後面接關鍵字,例如:功能列表EM-43"),
+        ]);
+      }
+      return;
+    }
+
+    const matches = await listFeatureModels(keyword);
+
+    if (!event.replyToken) return;
+
+    if (matches.length === 0) {
+      await replyMessage(event.replyToken, [
+        textMsg("價格表資料裡找不到包含「" + keyword + "」的型號"),
+      ]);
+      return;
+    }
+
+    await replyMessage(event.replyToken, [
+      textMsg("找到 " + matches.length + " 筆\n\n" + matches.slice(0, 40).join("\n")),
+    ]);
+    return;
+  }
 
   if (text.indexOf("列表") === 0) {
     const keyword = text.slice(2).trim();
