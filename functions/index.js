@@ -89,6 +89,28 @@ async function listModels(keywordRaw) {
   return matches;
 }
 
+async function queryFeatures(modelRaw) {
+  const model = modelRaw.trim().toUpperCase();
+  const doc = await sampoDb.collection("priceList").doc("current").get();
+
+  if (!doc.exists) {
+    return { model: model, found: false, specs: [] };
+  }
+
+  const sheets = doc.data().sheets || [];
+  for (let i = 0; i < sheets.length; i++) {
+    const items = sheets[i].items || [];
+    const match = items.find(function (it) {
+      return String(it.model).trim().toUpperCase() === model;
+    });
+    if (match) {
+      return { model: model, found: true, specs: match.specs || [] };
+    }
+  }
+
+  return { model: model, found: false, specs: [] };
+}
+
 exports.lineWebhook = onRequest({ region: "asia-east1" }, async (req, res) => {
   const signature = req.headers["x-line-signature"];
   const rawBody = req.rawBody;
@@ -119,7 +141,7 @@ async function handleEvent(event) {
     if (event.replyToken) {
       await replyMessage(event.replyToken, [
         textMsg(
-          "哈囉!我是聲寶庫存查詢小幫手。\n\n輸入「查」加型號即可查詢庫存,例如:\n查QM-98MI5200\n\n輸入「列表」加關鍵字可查詢多筆型號,例如:\n列表冷氣"
+          "哈囉!我是聲寶庫存查詢小幫手。\n\n輸入「查」加型號即可查詢庫存,例如:\n查QM-98MI5200\n\n輸入「查」加型號加「功能」可查詢規格,例如:\n查ES-B10F功能\n\n輸入「列表」加關鍵字可查詢多筆型號,例如:\n列表冷氣"
         ),
       ]);
     }
@@ -183,6 +205,44 @@ async function handleEvent(event) {
     });
 
     await replyMessage(event.replyToken, messages);
+    return;
+  }
+
+  if (text.charAt(0) === "查" && text.slice(-2) === "功能") {
+    const modelRaw = text.slice(1, -2).trim();
+
+    if (!modelRaw) {
+      if (event.replyToken) {
+        await replyMessage(event.replyToken, [
+          textMsg("請在「查」和「功能」中間輸入型號,例如:查ES-B10F功能"),
+        ]);
+      }
+      return;
+    }
+
+    const result = await queryFeatures(modelRaw);
+
+    if (!event.replyToken) return;
+
+    const displayName = await getDisplayName(groupId, userId);
+    const namePrefix = displayName ? displayName + " 查詢\n" : "";
+
+    if (!result.found) {
+      await replyMessage(event.replyToken, [
+        textMsg(namePrefix + result.model + " 查無此型號的功能資料,請確認型號是否正確"),
+      ]);
+    } else if (result.specs.length === 0) {
+      await replyMessage(event.replyToken, [
+        textMsg(namePrefix + result.model + " 目前沒有登記功能規格資料"),
+      ]);
+    } else {
+      const lines = result.specs.map(function (sp) {
+        return sp.label + "：" + sp.value;
+      });
+      await replyMessage(event.replyToken, [
+        textMsg(namePrefix + result.model + " 功能規格\n\n" + lines.join("\n")),
+      ]);
+    }
     return;
   }
 
