@@ -189,7 +189,9 @@ async function handleEvent(event) {
         textMsg(result.model + " 目前有貨\n庫存量:" + result.stock),
       ]);
     } else {
-      await replyMessage(event.replyToken, [textMsg(result.model + " 目前無貨")]);
+      await replyMessage(event.replyToken, [
+        textMsg(result.model + " 目前沒貨\n庫存量:0"),
+      ]);
     }
   }
 }
