@@ -204,6 +204,7 @@ async function handleEvent(event) {
 
     const displayName = await getDisplayName(groupId, userId);
     const namePrefix = displayName ? displayName + " 查詢\n" : "";
+    const warning = "\n\n※庫存10個以下需跟業務確認\n※無庫存也可以詢問業務";
 
     if (!result.found) {
       await replyMessage(event.replyToken, [
@@ -211,11 +212,15 @@ async function handleEvent(event) {
       ]);
     } else if (result.stock > 0) {
       await replyMessage(event.replyToken, [
-        textMsg(namePrefix + result.model + " 目前有貨\n庫存量:" + result.stock),
+        textMsg(
+          namePrefix + result.model + " 目前有貨\n庫存量:" + result.stock + warning
+        ),
       ]);
     } else {
       await replyMessage(event.replyToken, [
-        textMsg(namePrefix + result.model + " 目前沒貨\n庫存量:0"),
+        textMsg(
+          namePrefix + result.model + " 目前沒貨\n庫存量:0" + warning
+        ),
       ]);
     }
   }
