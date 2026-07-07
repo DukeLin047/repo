@@ -15,6 +15,7 @@ const sampoDb = sampoApp.firestore();
 const LINE_CHANNEL_SECRET = process.env.LINE_CHANNEL_SECRET || "";
 const LINE_CHANNEL_ACCESS_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN || "";
 const LINE_API = "https://api.line.me/v2/bot/message/reply";
+const LINE_PROFILE_API = "https://api.line.me/v2/bot";
 
 function verifySignature(rawBody, signature) {
   if (!LINE_CHANNEL_SECRET) return false;
@@ -37,6 +38,21 @@ async function replyMessage(replyToken, messages) {
   if (!res.ok) {
     const errText = await res.text();
     console.error("LINE reply failed: " + res.status + " " + errText);
+  }
+}
+
+async function getDisplayName(groupId, userId) {
+  if (!groupId || !userId) return null;
+  try {
+    const res = await fetch(
+      LINE_PROFILE_API + "/group/" + groupId + "/member/" + userId,
+      { headers: { Authorization: "Bearer " + LINE_CHANNEL_ACCESS_TOKEN } }
+    );
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.displayName || null;
+  } catch (e) {
+    return null;
   }
 }
 
@@ -113,6 +129,8 @@ async function handleEvent(event) {
   if (event.type !== "message" || event.message.type !== "text") return;
 
   const text = event.message.text.trim();
+  const groupId = event.source.type === "group" ? event.source.groupId : null;
+  const userId = event.source.userId;
 
   if (text.indexOf("列表") === 0) {
     const keyword = text.slice(2).trim();
@@ -137,6 +155,9 @@ async function handleEvent(event) {
       return;
     }
 
+    const displayName = await getDisplayName(groupId, userId);
+    const namePrefix = displayName ? displayName + " 查詢\n\n" : "";
+
     const lines = matches.map(function (it) {
       return it.model + "：" + it.stock;
     });
@@ -150,6 +171,7 @@ async function handleEvent(event) {
     const limitedChunks = chunks.slice(0, 5);
     const messages = limitedChunks.map(function (chunk, idx) {
       const header =
+        (idx === 0 ? namePrefix : "") +
         "找到 " +
         matches.length +
         " 筆" +
@@ -180,17 +202,20 @@ async function handleEvent(event) {
 
     if (!event.replyToken) return;
 
+    const displayName = await getDisplayName(groupId, userId);
+    const namePrefix = displayName ? displayName + " 查詢\n" : "";
+
     if (!result.found) {
       await replyMessage(event.replyToken, [
-        textMsg(result.model + " 查無此型號,請確認型號是否正確"),
+        textMsg(namePrefix + result.model + " 查無此型號,請確認型號是否正確"),
       ]);
     } else if (result.stock > 0) {
       await replyMessage(event.replyToken, [
-        textMsg(result.model + " 目前有貨\n庫存量:" + result.stock),
+        textMsg(namePrefix + result.model + " 目前有貨\n庫存量:" + result.stock),
       ]);
     } else {
       await replyMessage(event.replyToken, [
-        textMsg(result.model + " 目前沒貨\n庫存量:0"),
+        textMsg(namePrefix + result.model + " 目前沒貨\n庫存量:0"),
       ]);
     }
   }
