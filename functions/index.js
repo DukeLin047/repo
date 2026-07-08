@@ -147,7 +147,11 @@ async function queryStock(modelRaw) {
   if (allNotFound && modelRaw.indexOf("/") !== -1) {
     const combined = await queryStockSingle(modelRaw.trim().toUpperCase(), items);
     if (combined.found) {
-      return [combined];
+      // 資料庫裡是合併存放的一筆（例如 AU/AM-HF36D 或 RAU/RAM-HA80DC），
+      // 但仍要拆成多筆分別顯示，庫存量沿用同一個數字
+      return models.map(function (m) {
+        return { model: m, found: true, stock: combined.stock };
+      });
     }
   }
 
