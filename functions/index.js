@@ -138,6 +138,19 @@ async function queryStock(modelRaw) {
   for (let i = 0; i < models.length; i++) {
     results.push(await queryStockSingle(models[i], items));
   }
+
+  // 如果拆分後每一筆都查無資料，且原始輸入本身有 "/"，
+  // 再試一次用「合併寫法」直接比對（資料庫裡可能就是存成合併的一筆）
+  const allNotFound = results.every(function (r) {
+    return !r.found;
+  });
+  if (allNotFound && modelRaw.indexOf("/") !== -1) {
+    const combined = await queryStockSingle(modelRaw.trim().toUpperCase(), items);
+    if (combined.found) {
+      return [combined];
+    }
+  }
+
   return results;
 }
 
