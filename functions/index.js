@@ -187,17 +187,16 @@ async function handleEvent(event) {
   const userId = event.source.userId;
 
   if (event.type === "join") {
-    if (groupId) {
-      const allowed = await isGroupAllowed(groupId);
-      if (!allowed) {
-        await leaveGroup(groupId);
-        return;
-      }
-    }
+    // ※自動退出邏輯暫時停用，方便收集群組 ID 建立白名單
+    // const allowed = groupId ? await isGroupAllowed(groupId) : true;
+    // if (groupId && !allowed) {
+    //   await leaveGroup(groupId);
+    //   return;
+    // }
     if (event.replyToken) {
       await replyMessage(event.replyToken, [
         textMsg(
-          "哈囉!我是聲寶庫存查詢小幫手。\n\n輸入「查」加型號即可查詢庫存,例如:\n查QM-98MI5200\n\n輸入「查」加型號加「功能」可查詢規格,例如:\n查ES-B10F功能\n\n輸入「列表」加關鍵字可查詢多筆型號,例如:\n列表冷氣\n\n輸入「功能列表」加關鍵字可查詢價格表裡的型號,例如:\n功能列表EM-43"
+          "哈囉!我是聲寶庫存查詢小幫手。\n\n輸入「groupid」可以取得這個群組的 ID,提供給管理員設定白名單。\n\n設定完成後,即可輸入「查」加型號查詢庫存,例如:\n查QM-98MI5200"
         ),
       ]);
     }
@@ -381,7 +380,7 @@ async function handleEvent(event) {
     } else if (result.stock > 0) {
       await replyMessage(event.replyToken, [
         textMsg(
-          namePrefix + result.model + " 目前有貨\n庫存量:" + result.stock + warning
+          namePrefix + result.model + " 目前沒貨\n庫存量:0" + warning
         ),
       ]);
     } else {
