@@ -95,18 +95,50 @@ async function getItems() {
   return doc.data().items || [];
 }
 
-async function queryStock(modelRaw) {
-  const model = modelRaw.trim().toUpperCase();
-  const items = await getItems();
+// 把 "AU/AM-HF28D" 這種合併寫法拆成 ["AU-HF28D", "AM-HF28D"]
+// 如果沒有 "/" 就原樣傳回單一元素陣列
+function expandSlashModel(raw) {
+  const q = raw.trim().toUpperCase();
+  const slashIdx = q.indexOf("/");
+  if (slashIdx === -1) return [q];
+
+  const afterSlash = q.slice(slashIdx + 1);
+  const dashIdx = afterSlash.indexOf("-");
+  if (dashIdx === -1) {
+    return q
+      .split("/")
+      .map(function (s) {
+        return s.trim();
+      })
+      .filter(Boolean);
+  }
+  const firstPrefix = q.slice(0, slashIdx);
+  const secondPrefix = afterSlash.slice(0, dashIdx);
+  const suffix = afterSlash.slice(dashIdx);
+  return [firstPrefix + suffix, secondPrefix + suffix];
+}
+
+async function queryStockSingle(model, items) {
   const match = items.find(function (it) {
-    return String(it.model).trim().toUpperCase() === model;
+    return String(it.model).trim().toUpperCase().indexOf(model) === 0;
   });
 
   if (!match) {
     return { model: model, found: false, stock: 0 };
   }
 
-  return { model: model, found: true, stock: match.stock };
+  return { model: match.model, found: true, stock: match.stock };
+}
+
+async function queryStock(modelRaw) {
+  const items = await getItems();
+  const models = expandSlashModel(modelRaw);
+
+  const results = [];
+  for (let i = 0; i < models.length; i++) {
+    results.push(await queryStockSingle(models[i], items));
+  }
+  return results;
 }
 
 async function listModels(keywordRaw) {
@@ -365,7 +397,7 @@ async function handleEvent(event) {
       return;
     }
 
-    const result = await queryStock(modelRaw);
+    const results = await queryStock(modelRaw);
 
     if (!event.replyToken) return;
 
@@ -373,21 +405,35 @@ async function handleEvent(event) {
     const namePrefix = displayName ? displayName + " ，你好！\n" : "";
     const warning = "\n\n※庫存10個以下需跟業務確認\n※無庫存也可以詢問業務";
 
-    if (!result.found) {
-      await replyMessage(event.replyToken, [
-        textMsg(namePrefix + result.model + " 查無此型號,請確認型號是否正確"),
-      ]);
-    } else if (result.stock > 0) {
-      await replyMessage(event.replyToken, [
-        textMsg(
-          namePrefix + result.model + " 目前沒貨\n庫存量:0" + warning
-        ),
-      ]);
+    if (results.length === 1) {
+      const result = results[0];
+      if (!result.found) {
+        await replyMessage(event.replyToken, [
+          textMsg(namePrefix + result.model + " 查無此型號,請確認型號是否正確"),
+        ]);
+      } else if (result.stock > 0) {
+        await replyMessage(event.replyToken, [
+          textMsg(
+            namePrefix + result.model + " 目前有貨\n庫存量:" + result.stock + warning
+          ),
+        ]);
+      } else {
+        await replyMessage(event.replyToken, [
+          textMsg(
+            namePrefix + result.model + " 目前沒貨\n庫存量:0" + warning
+          ),
+        ]);
+      }
     } else {
+      // AU/AM 這種合併寫法：拆成多筆分別顯示
+      const lines = results.map(function (result) {
+        if (!result.found) {
+          return result.model + "：查無此型號";
+        }
+        return result.model + "：" + result.stock + "台";
+      });
       await replyMessage(event.replyToken, [
-        textMsg(
-          namePrefix + result.model + " 目前沒貨\n庫存量:0" + warning
-        ),
+        textMsg(namePrefix + lines.join("\n") + warning),
       ]);
     }
   }
