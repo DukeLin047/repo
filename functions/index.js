@@ -167,15 +167,7 @@ async function listModels(keywordRaw) {
   return matches;
 }
 
-async function queryFeatures(modelRaw) {
-  const model = modelRaw.trim().toUpperCase();
-  const doc = await sampoDb.collection("priceList").doc("current").get();
-
-  if (!doc.exists) {
-    return { model: model, found: false, specs: [] };
-  }
-
-  const sheets = doc.data().sheets || [];
+function queryFeaturesSingleFromSheets(model, sheets) {
   for (let i = 0; i < sheets.length; i++) {
     const items = sheets[i].items || [];
     const match = items.find(function (it) {
@@ -185,8 +177,37 @@ async function queryFeatures(modelRaw) {
       return { model: match.model, found: true, specs: match.specs || [] };
     }
   }
-
   return { model: model, found: false, specs: [] };
+}
+
+async function queryFeatures(modelRaw) {
+  const models = expandSlashModel(modelRaw);
+  const doc = await sampoDb.collection("priceList").doc("current").get();
+
+  if (!doc.exists) {
+    return models.map(function (m) {
+      return { model: m, found: false, specs: [] };
+    });
+  }
+
+  const sheets = doc.data().sheets || [];
+  const results = models.map(function (m) {
+    return queryFeaturesSingleFromSheets(m, sheets);
+  });
+
+  const allNotFound = results.every(function (r) {
+    return !r.found;
+  });
+  if (allNotFound && modelRaw.indexOf("/") !== -1) {
+    const combined = queryFeaturesSingleFromSheets(modelRaw.trim().toUpperCase(), sheets);
+    if (combined.found) {
+      return models.map(function (m) {
+        return { model: m, found: true, specs: combined.specs };
+      });
+    }
+  }
+
+  return results;
 }
 
 async function listFeatureModels(keywordRaw) {
@@ -376,27 +397,47 @@ async function handleEvent(event) {
       return;
     }
 
-    const result = await queryFeatures(modelRaw);
+    const results = await queryFeatures(modelRaw);
 
     if (!event.replyToken) return;
 
     const displayName = await getDisplayName(groupId, userId);
     const namePrefix = displayName ? displayName + " ，你好！\n" : "";
 
-    if (!result.found) {
-      await replyMessage(event.replyToken, [
-        textMsg(namePrefix + result.model + " 查無此型號的功能資料,請確認型號是否正確"),
-      ]);
-    } else if (result.specs.length === 0) {
-      await replyMessage(event.replyToken, [
-        textMsg(namePrefix + result.model + " 目前沒有登記功能規格資料"),
-      ]);
+    if (results.length === 1) {
+      const result = results[0];
+      if (!result.found) {
+        await replyMessage(event.replyToken, [
+          textMsg(namePrefix + result.model + " 查無此型號的功能資料,請確認型號是否正確"),
+        ]);
+      } else if (result.specs.length === 0) {
+        await replyMessage(event.replyToken, [
+          textMsg(namePrefix + result.model + " 目前沒有登記功能規格資料"),
+        ]);
+      } else {
+        const lines = result.specs.map(function (sp) {
+          return sp.label + "：" + sp.value;
+        });
+        await replyMessage(event.replyToken, [
+          textMsg(namePrefix + result.model + " 功能規格\n\n" + lines.join("\n")),
+        ]);
+      }
     } else {
-      const lines = result.specs.map(function (sp) {
-        return sp.label + "：" + sp.value;
+      // AU/AM 或 RAU/RAM 這種合併寫法：拆成多筆分別顯示
+      const blocks = results.map(function (result) {
+        if (!result.found) {
+          return result.model + "：查無此型號的功能資料";
+        }
+        if (result.specs.length === 0) {
+          return result.model + "：目前沒有登記功能規格資料";
+        }
+        const lines = result.specs.map(function (sp) {
+          return "　" + sp.label + "：" + sp.value;
+        });
+        return result.model + " 功能規格\n" + lines.join("\n");
       });
       await replyMessage(event.replyToken, [
-        textMsg(namePrefix + result.model + " 功能規格\n\n" + lines.join("\n")),
+        textMsg(namePrefix + blocks.join("\n\n")),
       ]);
     }
     return;
