@@ -227,6 +227,72 @@ async function listFeatureModels(keywordRaw) {
   return matches;
 }
 
+exports.uploadAnnouncementFile = onRequest({ region: "asia-east1" }, async (req, res) => {
+  res.set("Access-Control-Allow-Origin", "*");
+  res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.set("Access-Control-Allow-Headers", "Content-Type, Authorization");
+
+  if (req.method === "OPTIONS") {
+    res.status(204).send("");
+    return;
+  }
+  if (req.method !== "POST") {
+    res.status(405).send("Method not allowed");
+    return;
+  }
+
+  const authHeader = req.headers.authorization || "";
+  const idToken = authHeader.indexOf("Bearer ") === 0 ? authHeader.slice(7) : "";
+  if (!idToken) {
+    res.status(401).json({ ok: false, error: "missing token" });
+    return;
+  }
+
+  try {
+    await sampoApp.auth().verifyIdToken(idToken);
+  } catch (e) {
+    res.status(401).json({ ok: false, error: "invalid token" });
+    return;
+  }
+
+  const fileName = req.body && req.body.fileName ? String(req.body.fileName) : "file";
+  const contentType = req.body && req.body.contentType ? String(req.body.contentType) : "application/octet-stream";
+  const dataBase64 = req.body && req.body.dataBase64 ? String(req.body.dataBase64) : "";
+
+  if (!dataBase64) {
+    res.status(400).json({ ok: false, error: "missing file data" });
+    return;
+  }
+
+  try {
+    const buffer = Buffer.from(dataBase64, "base64");
+    // 限制單檔大小 8MB，避免超出 Cloud Functions 請求大小限制
+    if (buffer.length > 8 * 1024 * 1024) {
+      res.status(400).json({ ok: false, error: "檔案過大，請控制在 8MB 以內" });
+      return;
+    }
+
+    const bucket = admin.storage().bucket();
+    const safeName = fileName.replace(/[^a-zA-Z0-9._-]/g, "_");
+    const filePath = "announcements/" + Date.now() + "_" + safeName;
+    const file = bucket.file(filePath);
+    await file.save(buffer, { contentType: contentType, resumable: false });
+
+    const encodedPath = encodeURIComponent(filePath);
+    const url =
+      "https://firebasestorage.googleapis.com/v0/b/" +
+      bucket.name +
+      "/o/" +
+      encodedPath +
+      "?alt=media";
+
+    res.status(200).json({ ok: true, url: url });
+  } catch (e) {
+    console.error("uploadAnnouncementFile error:", e);
+    res.status(500).json({ ok: false, error: "上傳失敗" });
+  }
+});
+
 exports.sendAnnouncement = onRequest({ region: "asia-east1" }, async (req, res) => {
   res.set("Access-Control-Allow-Origin", "*");
   res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
