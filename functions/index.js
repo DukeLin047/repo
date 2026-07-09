@@ -227,6 +227,93 @@ async function listFeatureModels(keywordRaw) {
   return matches;
 }
 
+exports.sendAnnouncement = onRequest({ region: "asia-east1" }, async (req, res) => {
+  res.set("Access-Control-Allow-Origin", "*");
+  res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.set("Access-Control-Allow-Headers", "Content-Type, Authorization");
+
+  if (req.method === "OPTIONS") {
+    res.status(204).send("");
+    return;
+  }
+  if (req.method !== "POST") {
+    res.status(405).send("Method not allowed");
+    return;
+  }
+
+  const authHeader = req.headers.authorization || "";
+  const idToken = authHeader.indexOf("Bearer ") === 0 ? authHeader.slice(7) : "";
+  if (!idToken) {
+    res.status(401).json({ ok: false, error: "missing token" });
+    return;
+  }
+
+  try {
+    await sampoApp.auth().verifyIdToken(idToken);
+  } catch (e) {
+    res.status(401).json({ ok: false, error: "invalid token" });
+    return;
+  }
+
+  const text = (req.body && req.body.text ? String(req.body.text) : "").trim();
+  const fileUrl = req.body && req.body.fileUrl ? String(req.body.fileUrl) : "";
+  const fileType = req.body && req.body.fileType ? String(req.body.fileType) : "";
+
+  if (!text && !fileUrl) {
+    res.status(400).json({ ok: false, error: "empty announcement" });
+    return;
+  }
+
+  const messages = [];
+  if (fileType === "image" && fileUrl) {
+    messages.push({ type: "image", originalContentUrl: fileUrl, previewImageUrl: fileUrl });
+  }
+  if (text) {
+    messages.push(textMsg(text));
+  }
+  if (fileType !== "image" && fileUrl) {
+    messages.push(textMsg("附件下載連結：\n" + fileUrl));
+  }
+
+  const pushMessages = messages.slice(0, 5);
+
+  let groupIds = [];
+  try {
+    const snap = await sampoDb.collection("allowedGroups").get();
+    snap.forEach(function (doc) {
+      groupIds.push(doc.id);
+    });
+  } catch (e) {
+    console.error("讀取白名單失敗:", e);
+    res.status(500).json({ ok: false, error: "讀取白名單失敗" });
+    return;
+  }
+
+  let successCount = 0;
+  for (let i = 0; i < groupIds.length; i++) {
+    try {
+      const r = await fetch("https://api.line.me/v2/bot/message/push", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer " + LINE_CHANNEL_ACCESS_TOKEN,
+        },
+        body: JSON.stringify({ to: groupIds[i], messages: pushMessages }),
+      });
+      if (r.ok) {
+        successCount++;
+      } else {
+        const errText = await r.text();
+        console.error("push failed for group " + groupIds[i] + ": " + errText);
+      }
+    } catch (e) {
+      console.error("push error for group " + groupIds[i], e);
+    }
+  }
+
+  res.status(200).json({ ok: true, total: groupIds.length, success: successCount });
+});
+
 exports.lineWebhook = onRequest({ region: "asia-east1" }, async (req, res) => {
   const signature = req.headers["x-line-signature"];
   const rawBody = req.rawBody;
