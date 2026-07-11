@@ -15,6 +15,7 @@ const sampoDb = sampoApp.firestore();
 const LINE_CHANNEL_SECRET = process.env.LINE_CHANNEL_SECRET || "";
 const LINE_CHANNEL_ACCESS_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN || "";
 const LINE_API = "https://api.line.me/v2/bot/message/reply";
+const LINE_PUSH_API = "https://api.line.me/v2/bot/message/push";
 const LINE_PROFILE_API = "https://api.line.me/v2/bot";
 
 function verifySignature(rawBody, signature) {
@@ -39,6 +40,64 @@ async function replyMessage(replyToken, messages) {
     const errText = await res.text();
     console.error("LINE reply failed: " + res.status + " " + errText);
   }
+}
+
+async function pushMessage(to, messages) {
+  try {
+    const res = await fetch(LINE_PUSH_API, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer " + LINE_CHANNEL_ACCESS_TOKEN,
+      },
+      body: JSON.stringify({ to: to, messages: messages }),
+    });
+    if (!res.ok) {
+      const errText = await res.text();
+      console.error("LINE push failed: " + res.status + " " + errText);
+    }
+  } catch (e) {
+    console.error("pushMessage error:", e);
+  }
+}
+
+async function getNotifyUserId() {
+  try {
+    const doc = await sampoDb.collection("settings").doc("notify").get();
+    if (!doc.exists) return null;
+    return doc.data().userId || null;
+  } catch (e) {
+    console.error("getNotifyUserId error:", e);
+    return null;
+  }
+}
+
+async function getGroupLabel(groupId) {
+  if (!groupId) return "私訊";
+  try {
+    const doc = await sampoDb.collection("allowedGroups").doc(groupId).get();
+    if (doc.exists && doc.data().name) return doc.data().name;
+  } catch (e) {
+    console.error("getGroupLabel error:", e);
+  }
+  return groupId;
+}
+
+async function notifyLowStock(groupId, askerName, lowStockResults) {
+  if (!lowStockResults || lowStockResults.length === 0) return;
+  const notifyUserId = await getNotifyUserId();
+  if (!notifyUserId) return;
+
+  const groupLabel = await getGroupLabel(groupId);
+  const asker = askerName || "有人";
+  const lines = lowStockResults.map(function (r) {
+    return r.model + "：" + r.stock + (r.stock === 0 ? "（無庫存）" : "（低庫存）");
+  });
+
+  const text =
+    "📉 低庫存提醒\n\n群組：" + groupLabel + "\n詢問人：" + asker + "\n\n" + lines.join("\n");
+
+  await pushMessage(notifyUserId, [textMsg(text)]);
 }
 
 async function leaveGroup(groupId) {
@@ -646,6 +705,16 @@ async function handleEvent(event) {
       await replyMessage(event.replyToken, [
         textMsg(namePrefix + lines.join("\n") + warning),
       ]);
+    }
+
+    // 低庫存（含無庫存）自動通知管理員
+    const lowStockResults = results.filter(function (r) {
+      return r.found && r.stock <= 10;
+    });
+    if (lowStockResults.length > 0) {
+      notifyLowStock(groupId, displayName, lowStockResults).catch(function (err) {
+        console.error("notifyLowStock error:", err);
+      });
     }
   }
 }
