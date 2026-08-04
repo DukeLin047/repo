@@ -192,11 +192,27 @@ async function queryStockSingle(model, items) {
     return normalizeModel(it.model) === target;
   });
 
-  if (!match) {
-    return { model: model, found: false, stock: 0 };
+  if (match) {
+    return { model: match.model, found: true, stock: match.stock };
   }
 
-  return { model: match.model, found: true, stock: match.stock };
+  // 找不到獨立型號時，反向找合併寫法：
+  // 例如查 AU-NF50D，資料庫裡可能存的是 AU/AM-NF50D
+  // 規則：把資料庫型號的 "X/Y-SUFFIX" 展開成 "X-SUFFIX" 與 "Y-SUFFIX" 再比對
+  const combinedMatch = items.find(function (it) {
+    const norm = normalizeModel(it.model);
+    if (norm.indexOf("/") === -1) return false;
+    const expanded = expandSlashModel(norm);
+    return expanded.some(function (e) {
+      return normalizeModel(e) === target;
+    });
+  });
+
+  if (combinedMatch) {
+    return { model: model, found: true, stock: combinedMatch.stock };
+  }
+
+  return { model: model, found: false, stock: 0 };
 }
 
 async function queryStock(modelRaw) {
