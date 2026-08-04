@@ -177,9 +177,19 @@ function expandSlashModel(raw) {
   return [firstPrefix + suffix, secondPrefix + suffix];
 }
 
+// 清除型號裡看不見的字元（換行、多餘空白、全形空白等），用於精準比對
+function normalizeModel(raw) {
+  return String(raw)
+    .replace(/[\r\n\t\u3000\u00a0\u200b-\u200d\ufeff]/g, "")
+    .replace(/\s+/g, "")
+    .trim()
+    .toUpperCase();
+}
+
 async function queryStockSingle(model, items) {
+  const target = normalizeModel(model);
   const match = items.find(function (it) {
-    return String(it.model).trim().toUpperCase().indexOf(model) === 0;
+    return normalizeModel(it.model) === target;
   });
 
   if (!match) {
@@ -218,24 +228,44 @@ async function queryStock(modelRaw) {
 }
 
 async function listModels(keywordRaw) {
-  const keyword = keywordRaw.trim().toUpperCase();
+  const keyword = normalizeModel(keywordRaw);
   const items = await getItems();
   const matches = items.filter(function (it) {
-    return String(it.model).trim().toUpperCase().indexOf(keyword) !== -1;
+    return normalizeModel(it.model).indexOf(keyword) !== -1;
   });
   return matches;
 }
 
 function queryFeaturesSingleFromSheets(model, sheets) {
+  const target = normalizeModel(model);
+
+  // 先做精準比對
   for (let i = 0; i < sheets.length; i++) {
     const items = sheets[i].items || [];
     const match = items.find(function (it) {
-      return String(it.model).trim().toUpperCase().indexOf(model) === 0;
+      return normalizeModel(it.model) === target;
     });
     if (match) {
       return { model: match.model, found: true, specs: match.specs || [] };
     }
   }
+
+  // 價格表的機型欄位常在型號後面附加說明文字（例如 "EM-43MDS200 MT-200(視訊盒)"），
+  // 精準比對不到時，退而求其次用「開頭符合 + 後面接非英數字元」比對，
+  // 避免誤抓 AU-NF50D 對到 AU-NF50DC 這種不同型號
+  for (let i = 0; i < sheets.length; i++) {
+    const items = sheets[i].items || [];
+    const match = items.find(function (it) {
+      const norm = normalizeModel(it.model);
+      if (norm.indexOf(target) !== 0) return false;
+      const nextChar = norm.charAt(target.length);
+      return nextChar === "" || !/[A-Z0-9]/.test(nextChar);
+    });
+    if (match) {
+      return { model: match.model, found: true, specs: match.specs || [] };
+    }
+  }
+
   return { model: model, found: false, specs: [] };
 }
 
