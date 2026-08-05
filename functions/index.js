@@ -315,6 +315,82 @@ async function queryFeatures(modelRaw) {
   return results;
 }
 
+function queryPriceSingleFromSheets(model, sheets) {
+  const target = normalizeModel(model);
+
+  // 先精準比對
+  for (let i = 0; i < sheets.length; i++) {
+    const items = sheets[i].items || [];
+    const match = items.find(function (it) {
+      return normalizeModel(it.model) === target;
+    });
+    if (match) {
+      return { model: match.model, found: true, base: match.base || "", promo: match.promo || "" };
+    }
+  }
+
+  // 價格表機型欄位常附加說明文字，退回「開頭符合 + 後面接非英數字元」比對
+  for (let i = 0; i < sheets.length; i++) {
+    const items = sheets[i].items || [];
+    const match = items.find(function (it) {
+      const norm = normalizeModel(it.model);
+      if (norm.indexOf(target) !== 0) return false;
+      const nextChar = norm.charAt(target.length);
+      return nextChar === "" || !/[A-Z0-9]/.test(nextChar);
+    });
+    if (match) {
+      return { model: match.model, found: true, base: match.base || "", promo: match.promo || "" };
+    }
+  }
+
+  // 反向找合併寫法：查 AU-NF50D，價格表裡可能存 AU/AM-NF50D
+  for (let i = 0; i < sheets.length; i++) {
+    const items = sheets[i].items || [];
+    const match = items.find(function (it) {
+      const norm = normalizeModel(it.model);
+      if (norm.indexOf("/") === -1) return false;
+      return expandSlashModel(norm).some(function (e) {
+        return normalizeModel(e) === target;
+      });
+    });
+    if (match) {
+      return { model: match.model, found: true, base: match.base || "", promo: match.promo || "" };
+    }
+  }
+
+  return { model: model, found: false, base: "", promo: "" };
+}
+
+async function queryPrice(modelRaw) {
+  const models = expandSlashModel(modelRaw);
+  const doc = await sampoDb.collection("priceList").doc("current").get();
+
+  if (!doc.exists) {
+    return models.map(function (m) {
+      return { model: m, found: false, base: "", promo: "" };
+    });
+  }
+
+  const sheets = doc.data().sheets || [];
+  const results = models.map(function (m) {
+    return queryPriceSingleFromSheets(m, sheets);
+  });
+
+  const allNotFound = results.every(function (r) {
+    return !r.found;
+  });
+  if (allNotFound && modelRaw.indexOf("/") !== -1) {
+    const combined = queryPriceSingleFromSheets(modelRaw.trim().toUpperCase(), sheets);
+    if (combined.found) {
+      return models.map(function (m) {
+        return { model: m, found: true, base: combined.base, promo: combined.promo };
+      });
+    }
+  }
+
+  return results;
+}
+
 async function listFeatureModels(keywordRaw) {
   const keyword = keywordRaw.trim().toUpperCase();
   const doc = await sampoDb.collection("priceList").doc("current").get();
@@ -524,7 +600,7 @@ async function handleEvent(event) {
     if (event.replyToken) {
       await replyMessage(event.replyToken, [
         textMsg(
-          "哈囉!我是聲寶庫存查詢小幫手。\n\n輸入「groupid」可以取得這個群組的 ID,提供給管理員設定白名單。\n\n設定完成後,即可輸入「查」加型號查詢庫存,例如:\n查QM-98MI5200"
+          "哈囉!我是聲寶庫存查詢小幫手。\n\n輸入「groupid」可以取得這個群組的 ID,提供給管理員設定白名單。\n\n設定完成後可以這樣查詢:\n查QM-98MI5200（查庫存）\n查ES-B10F功能（查規格）\n查ES-B10F價錢（查批價）\n列表冷氣（查多筆型號）"
         ),
       ]);
     }
@@ -640,6 +716,57 @@ async function handleEvent(event) {
     });
 
     await replyMessage(event.replyToken, messages);
+    return;
+  }
+
+  if (text.charAt(0) === "查" && text.slice(-2) === "價錢") {
+    const modelRaw = text.slice(1, -2).trim();
+
+    if (!modelRaw) {
+      if (event.replyToken) {
+        await replyMessage(event.replyToken, [
+          textMsg("請在「查」和「價錢」中間輸入型號,例如:查ES-B10F價錢"),
+        ]);
+      }
+      return;
+    }
+
+    const results = await queryPrice(modelRaw);
+
+    if (!event.replyToken) return;
+
+    const displayName = await getDisplayName(groupId, userId);
+    const namePrefix = displayName ? displayName + " ，你好！\n" : "";
+
+    if (results.length === 1) {
+      const result = results[0];
+      if (!result.found) {
+        await replyMessage(event.replyToken, [
+          textMsg(namePrefix + result.model + " 查無此型號的價格資料,請確認型號是否正確"),
+        ]);
+      } else if (!result.base) {
+        await replyMessage(event.replyToken, [
+          textMsg(namePrefix + result.model + " 目前沒有登記批價"),
+        ]);
+      } else {
+        await replyMessage(event.replyToken, [
+          textMsg(namePrefix + result.model + "\n批價：" + result.base),
+        ]);
+      }
+    } else {
+      const lines = results.map(function (result) {
+        if (!result.found) {
+          return result.model + "：查無此型號的價格資料";
+        }
+        if (!result.base) {
+          return result.model + "：目前沒有登記批價";
+        }
+        return result.model + "　批價：" + result.base;
+      });
+      await replyMessage(event.replyToken, [
+        textMsg(namePrefix + lines.join("\n")),
+      ]);
+    }
     return;
   }
 
