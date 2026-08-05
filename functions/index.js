@@ -719,13 +719,18 @@ async function handleEvent(event) {
     return;
   }
 
-  if (text.charAt(0) === "查" && text.slice(-2) === "價錢") {
-    const modelRaw = text.slice(1, -2).trim();
+  // 支援「價錢」「價格」「多少錢」三種說法
+  const priceSuffix = ["價錢", "價格", "多少錢"].find(function (s) {
+    return text.charAt(0) === "查" && text.slice(-s.length) === s;
+  });
+
+  if (priceSuffix) {
+    const modelRaw = text.slice(1, -priceSuffix.length).trim();
 
     if (!modelRaw) {
       if (event.replyToken) {
         await replyMessage(event.replyToken, [
-          textMsg("請在「查」和「價錢」中間輸入型號,例如:查ES-B10F價錢"),
+          textMsg("請在「查」和「價錢」中間輸入型號,例如:查ES-B10F價錢\n(也可以用「價格」或「多少錢」)"),
         ]);
       }
       return;
