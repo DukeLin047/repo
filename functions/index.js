@@ -282,6 +282,21 @@ function queryFeaturesSingleFromSheets(model, sheets) {
     }
   }
 
+  // 反向找合併寫法：查 RAU-HA50DC 時，價格表裡可能存的是 RAU/RAM-HA50DC
+  for (let i = 0; i < sheets.length; i++) {
+    const items = sheets[i].items || [];
+    const match = items.find(function (it) {
+      const norm = normalizeModel(it.model);
+      if (norm.indexOf("/") === -1) return false;
+      return expandSlashModel(norm).some(function (e) {
+        return normalizeModel(e) === target;
+      });
+    });
+    if (match) {
+      return { model: match.model, found: true, specs: match.specs || [] };
+    }
+  }
+
   return { model: model, found: false, specs: [] };
 }
 
@@ -358,6 +373,21 @@ function queryPriceSingleFromSheets(model, sheets) {
     }
   }
 
+  // 反向找合併寫法
+  for (let i = 0; i < sheets.length; i++) {
+    const items = sheets[i].items || [];
+    const match = items.find(function (it) {
+      const norm = normalizeModel(it.model);
+      if (norm.indexOf("/") === -1) return false;
+      return expandSlashModel(norm).some(function (e) {
+        return normalizeModel(e) === target;
+      });
+    });
+    if (match) {
+      return { model: match.model, found: true, base: match.base || "", promo: match.promo || "" };
+    }
+  }
+
   return { model: model, found: false, base: "", promo: "" };
 }
 
@@ -392,7 +422,7 @@ async function queryPrice(modelRaw) {
 }
 
 async function listFeatureModels(keywordRaw) {
-  const keyword = keywordRaw.trim().toUpperCase();
+  const keyword = normalizeModel(keywordRaw);
   const doc = await sampoDb.collection("priceList").doc("current").get();
   if (!doc.exists) return [];
 
@@ -400,7 +430,7 @@ async function listFeatureModels(keywordRaw) {
   const matches = [];
   sheets.forEach(function (sheet) {
     (sheet.items || []).forEach(function (it) {
-      if (String(it.model).trim().toUpperCase().indexOf(keyword) !== -1) {
+      if (normalizeModel(it.model).indexOf(keyword) !== -1) {
         matches.push(it.model);
       }
     });
