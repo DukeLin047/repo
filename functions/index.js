@@ -177,13 +177,22 @@ function expandSlashModel(raw) {
   return [firstPrefix + suffix, secondPrefix + suffix];
 }
 
-// 清除型號裡看不見的字元（換行、多餘空白、全形空白等），用於精準比對
+// 清除型號裡看不見的字元，用於精準比對。
+// 換行/空白會被轉成單一空格（而不是直接刪除），避免把
+// "EM-50AIT3220\n MT-320" 這種兩段式資料黏成一個假型號
 function normalizeModel(raw) {
   return String(raw)
-    .replace(/[\r\n\t\u3000\u00a0\u200b-\u200d\ufeff]/g, "")
-    .replace(/\s+/g, "")
+    .replace(/[\u200b-\u200d\ufeff]/g, "")
+    .replace(/[\r\n\t\u3000\u00a0]/g, " ")
+    .replace(/\s+/g, " ")
     .trim()
     .toUpperCase();
+}
+
+// 取出型號的「主型號」部分：價格表常在型號後面接空格再加附註
+// （例如 "EM-50AIT3220 MT-320"），比對時以第一段為準
+function primaryModel(raw) {
+  return normalizeModel(raw).split(" ")[0];
 }
 
 async function queryStockSingle(model, items) {
@@ -200,7 +209,7 @@ async function queryStockSingle(model, items) {
   // 例如查 AU-NF50D，資料庫裡可能存的是 AU/AM-NF50D
   // 規則：把資料庫型號的 "X/Y-SUFFIX" 展開成 "X-SUFFIX" 與 "Y-SUFFIX" 再比對
   const combinedMatch = items.find(function (it) {
-    const norm = normalizeModel(it.model);
+    const norm = primaryModel(it.model);
     if (norm.indexOf("/") === -1) return false;
     const expanded = expandSlashModel(norm);
     return expanded.some(function (e) {
@@ -266,16 +275,12 @@ function queryFeaturesSingleFromSheets(model, sheets) {
     }
   }
 
-  // 價格表的機型欄位常在型號後面附加說明文字（例如 "EM-43MDS200 MT-200(視訊盒)"），
-  // 精準比對不到時，退而求其次用「開頭符合 + 後面接非英數字元」比對，
-  // 避免誤抓 AU-NF50D 對到 AU-NF50DC 這種不同型號
+  // 價格表的機型欄位常在型號後面接附註（例如 "EM-50AIT3220 MT-320"），
+  // 精準比對不到時，改用「主型號」（第一段文字）比對
   for (let i = 0; i < sheets.length; i++) {
     const items = sheets[i].items || [];
     const match = items.find(function (it) {
-      const norm = normalizeModel(it.model);
-      if (norm.indexOf(target) !== 0) return false;
-      const nextChar = norm.charAt(target.length);
-      return nextChar === "" || !/[A-Z0-9]/.test(nextChar);
+      return primaryModel(it.model) === target;
     });
     if (match) {
       return { model: match.model, found: true, specs: match.specs || [] };
@@ -286,7 +291,7 @@ function queryFeaturesSingleFromSheets(model, sheets) {
   for (let i = 0; i < sheets.length; i++) {
     const items = sheets[i].items || [];
     const match = items.find(function (it) {
-      const norm = normalizeModel(it.model);
+      const norm = primaryModel(it.model);
       if (norm.indexOf("/") === -1) return false;
       return expandSlashModel(norm).some(function (e) {
         return normalizeModel(e) === target;
@@ -344,14 +349,12 @@ function queryPriceSingleFromSheets(model, sheets) {
     }
   }
 
-  // 價格表機型欄位常附加說明文字，退回「開頭符合 + 後面接非英數字元」比對
+  // 價格表機型欄位常在型號後面接附註（例如 "EM-50AIT3220 MT-320"），
+  // 改用「主型號」（第一段文字）比對
   for (let i = 0; i < sheets.length; i++) {
     const items = sheets[i].items || [];
     const match = items.find(function (it) {
-      const norm = normalizeModel(it.model);
-      if (norm.indexOf(target) !== 0) return false;
-      const nextChar = norm.charAt(target.length);
-      return nextChar === "" || !/[A-Z0-9]/.test(nextChar);
+      return primaryModel(it.model) === target;
     });
     if (match) {
       return { model: match.model, found: true, base: match.base || "", promo: match.promo || "" };
@@ -362,22 +365,7 @@ function queryPriceSingleFromSheets(model, sheets) {
   for (let i = 0; i < sheets.length; i++) {
     const items = sheets[i].items || [];
     const match = items.find(function (it) {
-      const norm = normalizeModel(it.model);
-      if (norm.indexOf("/") === -1) return false;
-      return expandSlashModel(norm).some(function (e) {
-        return normalizeModel(e) === target;
-      });
-    });
-    if (match) {
-      return { model: match.model, found: true, base: match.base || "", promo: match.promo || "" };
-    }
-  }
-
-  // 反向找合併寫法
-  for (let i = 0; i < sheets.length; i++) {
-    const items = sheets[i].items || [];
-    const match = items.find(function (it) {
-      const norm = normalizeModel(it.model);
+      const norm = primaryModel(it.model);
       if (norm.indexOf("/") === -1) return false;
       return expandSlashModel(norm).some(function (e) {
         return normalizeModel(e) === target;
