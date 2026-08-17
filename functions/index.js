@@ -133,14 +133,23 @@ async function getDisplayName(groupId, userId) {
   }
 }
 
-async function isGroupAllowed(groupId) {
-  if (!groupId) return false;
+// 取得群組權限：回傳 null 表示不在白名單
+// 有設定 permissions 就照設定，沒有的話預設四個功能全開
+async function getGroupPermissions(groupId) {
+  if (!groupId) return null;
   try {
     const doc = await sampoDb.collection("allowedGroups").doc(groupId).get();
-    return doc.exists;
+    if (!doc.exists) return null;
+    const p = doc.data().permissions || {};
+    return {
+      stock: p.stock !== false,
+      feature: p.feature !== false,
+      price: p.price !== false,
+      list: p.list !== false,
+    };
   } catch (e) {
-    console.error("isGroupAllowed error:", e);
-    return false;
+    console.error("getGroupPermissions error:", e);
+    return null;
   }
 }
 
@@ -610,8 +619,8 @@ async function handleEvent(event) {
 
   if (event.type === "join") {
     // ※自動退出邏輯暫時停用，方便收集群組 ID 建立白名單
-    // const allowed = groupId ? await isGroupAllowed(groupId) : true;
-    // if (groupId && !allowed) {
+    // const perms = groupId ? await getGroupPermissions(groupId) : null;
+    // if (groupId && !perms) {
     //   await leaveGroup(groupId);
     //   return;
     // }
@@ -648,10 +657,11 @@ async function handleEvent(event) {
 
   // 其餘查詢指令：僅限白名單群組使用（私訊一律不回應）
   if (!groupId) return;
-  const allowed = await isGroupAllowed(groupId);
-  if (!allowed) return;
+  const perms = await getGroupPermissions(groupId);
+  if (!perms) return;
 
   if (text.indexOf("功能列表") === 0) {
+    if (!perms.list) return;
     const keyword = text.slice(4).trim();
 
     if (!keyword) {
@@ -684,6 +694,7 @@ async function handleEvent(event) {
   }
 
   if (text.indexOf("列表") === 0) {
+    if (!perms.list) return;
     const keyword = text.slice(2).trim();
 
     if (!keyword) {
@@ -743,6 +754,7 @@ async function handleEvent(event) {
   });
 
   if (priceSuffix) {
+    if (!perms.price) return;
     const modelRaw = text.slice(1, -priceSuffix.length).trim();
 
     if (!modelRaw) {
@@ -794,6 +806,7 @@ async function handleEvent(event) {
   }
 
   if (text.charAt(0) === "查" && text.slice(-2) === "功能") {
+    if (!perms.feature) return;
     const modelRaw = text.slice(1, -2).trim();
 
     if (!modelRaw) {
@@ -852,6 +865,7 @@ async function handleEvent(event) {
   }
 
   if (text.charAt(0) === "查") {
+    if (!perms.stock) return;
     const modelRaw = text.slice(1).trim();
 
     if (!modelRaw) {
