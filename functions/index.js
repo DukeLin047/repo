@@ -83,7 +83,7 @@ async function getGroupLabel(groupId) {
   return groupId;
 }
 
-async function notifyLowStock(groupId, askerName, lowStockResults) {
+async function notifyLowStock(groupId, askerName, lowStockResults, location) {
   if (!lowStockResults || lowStockResults.length === 0) return;
   const notifyUserId = await getNotifyUserId();
   if (!notifyUserId) return;
@@ -95,7 +95,9 @@ async function notifyLowStock(groupId, askerName, lowStockResults) {
   });
 
   const text =
-    "📉 低庫存提醒\n\n群組：" + groupLabel + "\n詢問人：" + asker + "\n\n" + lines.join("\n");
+    "📉 低庫存提醒\n\n群組：" + groupLabel +
+    (location ? "\n儲位：" + location : "") +
+    "\n詢問人：" + asker + "\n\n" + lines.join("\n");
 
   await pushMessage(notifyUserId, [textMsg(text)]);
 }
@@ -140,12 +142,14 @@ async function getGroupPermissions(groupId) {
   try {
     const doc = await sampoDb.collection("allowedGroups").doc(groupId).get();
     if (!doc.exists) return null;
-    const p = doc.data().permissions || {};
+    const d = doc.data();
+    const p = d.permissions || {};
     return {
       stock: p.stock !== false,
       feature: p.feature !== false,
       price: p.price !== false,
       list: p.list !== false,
+      location: d.location || "",
     };
   } catch (e) {
     console.error("getGroupPermissions error:", e);
@@ -157,10 +161,19 @@ function textMsg(text) {
   return { type: "text", text: text };
 }
 
-async function getItems() {
+// 取得庫存清單。指定 location 時取該儲位資料，
+// 沒指定或該儲位無資料時，退回預設的 items
+async function getItems(location) {
   const doc = await sampoDb.collection("inventory").doc("current").get();
   if (!doc.exists) return [];
-  return doc.data().items || [];
+  const data = doc.data();
+  if (location) {
+    const locations = data.locations || {};
+    if (locations[location] && locations[location].length) {
+      return locations[location];
+    }
+  }
+  return data.items || [];
 }
 
 // 把 "AU/AM-HF28D" 這種合併寫法拆成 ["AU-HF28D", "AM-HF28D"]
@@ -233,8 +246,8 @@ async function queryStockSingle(model, items) {
   return { model: model, found: false, stock: 0 };
 }
 
-async function queryStock(modelRaw) {
-  const items = await getItems();
+async function queryStock(modelRaw, location) {
+  const items = await getItems(location);
   const models = expandSlashModel(modelRaw);
 
   const results = [];
@@ -261,9 +274,9 @@ async function queryStock(modelRaw) {
   return results;
 }
 
-async function listModels(keywordRaw) {
+async function listModels(keywordRaw, location) {
   const keyword = normalizeModel(keywordRaw);
-  const items = await getItems();
+  const items = await getItems(location);
   const matches = items.filter(function (it) {
     return normalizeModel(it.model).indexOf(keyword) !== -1;
   });
@@ -706,7 +719,7 @@ async function handleEvent(event) {
       return;
     }
 
-    const matches = await listModels(keyword);
+    const matches = await listModels(keyword, perms.location);
 
     if (!event.replyToken) return;
 
@@ -877,7 +890,7 @@ async function handleEvent(event) {
       return;
     }
 
-    const results = await queryStock(modelRaw);
+    const results = await queryStock(modelRaw, perms.location);
 
     if (!event.replyToken) return;
 
@@ -922,7 +935,7 @@ async function handleEvent(event) {
       return r.found && r.stock <= 10;
     });
     if (lowStockResults.length > 0) {
-      notifyLowStock(groupId, displayName, lowStockResults).catch(function (err) {
+      notifyLowStock(groupId, displayName, lowStockResults, perms.location).catch(function (err) {
         console.error("notifyLowStock error:", err);
       });
     }
