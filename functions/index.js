@@ -640,7 +640,7 @@ async function handleEvent(event) {
     if (event.replyToken) {
       await replyMessage(event.replyToken, [
         textMsg(
-          "哈囉!我是聲寶庫存查詢小幫手。\n\n輸入「groupid」可以取得這個群組的 ID,提供給管理員設定白名單。\n\n設定完成後可以這樣查詢:\n查QM-98MI5200（查庫存）\n查ES-B10F功能（查規格）\n查ES-B10F價錢（查批價）\n列表冷氣（查多筆型號）"
+          "哈囉!我是聲寶庫存查詢小幫手。\n\n輸入「groupid」可以取得這個群組的 ID,提供給管理員設定白名單。\n\n設定完成後可以這樣查詢:\n查QM-98MI5200（查庫存）\n查ES-B10F功能（查規格）\n查ES-B10F價錢（查批價）"
         ),
       ]);
     }
