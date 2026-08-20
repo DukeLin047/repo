@@ -157,6 +157,55 @@ async function getGroupPermissions(groupId) {
   }
 }
 
+// 記錄機器人加入某群組的時間（用於「未設定白名單就自動退出」）
+async function markGroupJoined(groupId) {
+  if (!groupId) return;
+  try {
+    await sampoDb.collection("pendingGroups").doc(groupId).set({
+      joinedAt: Date.now(),
+    });
+  } catch (e) {
+    console.error("markGroupJoined error:", e);
+  }
+}
+
+async function clearGroupPending(groupId) {
+  if (!groupId) return;
+  try {
+    await sampoDb.collection("pendingGroups").doc(groupId).delete();
+  } catch (e) {
+    console.error("clearGroupPending error:", e);
+  }
+}
+
+// 檢查是否為「加入超過寬限時間、但仍未加入白名單」的群組
+// 是的話讓機器人退出並回傳 true
+const JOIN_GRACE_MS = 2 * 60 * 1000; // 2 分鐘
+
+async function leaveIfGraceExpired(groupId) {
+  if (!groupId) return false;
+  try {
+    const doc = await sampoDb.collection("pendingGroups").doc(groupId).get();
+    if (!doc.exists) {
+      // 沒有記錄（可能是舊群組），補記錄一次，從現在起算寬限時間
+      await markGroupJoined(groupId);
+      return false;
+    }
+    const joinedAt = doc.data().joinedAt || 0;
+    if (Date.now() - joinedAt < JOIN_GRACE_MS) return false;
+
+    await pushMessage(groupId, [
+      textMsg("未在時限內完成白名單設定，我先退出囉。需要使用請再邀請我並盡快設定。"),
+    ]);
+    await leaveGroup(groupId);
+    await clearGroupPending(groupId);
+    return true;
+  } catch (e) {
+    console.error("leaveIfGraceExpired error:", e);
+    return false;
+  }
+}
+
 function textMsg(text) {
   return { type: "text", text: text };
 }
@@ -514,6 +563,53 @@ exports.uploadAnnouncementFile = onRequest({ region: "asia-east1" }, async (req,
   }
 });
 
+exports.leaveGroupNow = onRequest({ region: "asia-east1" }, async (req, res) => {
+  res.set("Access-Control-Allow-Origin", "*");
+  res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.set("Access-Control-Allow-Headers", "Content-Type, Authorization");
+
+  if (req.method === "OPTIONS") {
+    res.status(204).send("");
+    return;
+  }
+  if (req.method !== "POST") {
+    res.status(405).send("Method not allowed");
+    return;
+  }
+
+  const authHeader = req.headers.authorization || "";
+  const idToken = authHeader.indexOf("Bearer ") === 0 ? authHeader.slice(7) : "";
+  if (!idToken) {
+    res.status(401).json({ ok: false, error: "missing token" });
+    return;
+  }
+
+  try {
+    await sampoApp.auth().verifyIdToken(idToken);
+  } catch (e) {
+    res.status(401).json({ ok: false, error: "invalid token" });
+    return;
+  }
+
+  const groupId = req.body && req.body.groupId ? String(req.body.groupId) : "";
+  if (!groupId) {
+    res.status(400).json({ ok: false, error: "missing groupId" });
+    return;
+  }
+
+  try {
+    await pushMessage(groupId, [
+      textMsg("此群組已被管理員移除使用權限，我先退出囉。"),
+    ]);
+    await leaveGroup(groupId);
+    await clearGroupPending(groupId);
+    res.status(200).json({ ok: true });
+  } catch (e) {
+    console.error("leaveGroupNow error:", e);
+    res.status(500).json({ ok: false, error: "退出失敗" });
+  }
+});
+
 exports.sendAnnouncement = onRequest({ region: "asia-east1" }, async (req, res) => {
   res.set("Access-Control-Allow-Origin", "*");
   res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -631,19 +727,29 @@ async function handleEvent(event) {
   const userId = event.source.userId;
 
   if (event.type === "join") {
-    // ※自動退出邏輯暫時停用，方便收集群組 ID 建立白名單
-    // const perms = groupId ? await getGroupPermissions(groupId) : null;
-    // if (groupId && !perms) {
-    //   await leaveGroup(groupId);
-    //   return;
-    // }
+    if (groupId) {
+      const perms = await getGroupPermissions(groupId);
+      if (perms) {
+        // 已在白名單，清除待設定記錄
+        await clearGroupPending(groupId);
+      } else {
+        // 尚未設定白名單：開始計算 2 分鐘寬限時間
+        await markGroupJoined(groupId);
+      }
+    }
     if (event.replyToken) {
       await replyMessage(event.replyToken, [
         textMsg(
-          "哈囉!我是聲寶庫存查詢小幫手。\n\n輸入「groupid」可以取得這個群組的 ID,提供給管理員設定白名單。\n\n設定完成後可以這樣查詢:\n查QM-98MI5200（查庫存）\n查ES-B10F功能（查規格）\n查ES-B10F價錢（查批價）"
+          "哈囉!我是聲寶庫存查詢小幫手。\n\n輸入「groupid」可以取得這個群組的 ID,提供給管理員設定白名單。\n※若 2 分鐘內未完成設定,我會自動退出群組。\n\n設定完成後可以這樣查詢:\n查QM-98MI5200（查庫存）\n查ES-B10F功能（查規格）\n查ES-B10F價錢（查批價）"
         ),
       ]);
     }
+    return;
+  }
+
+  if (event.type === "leave") {
+    // 被踢出或自行退出時清除記錄
+    await clearGroupPending(groupId);
     return;
   }
 
@@ -668,10 +774,25 @@ async function handleEvent(event) {
     return;
   }
 
+  // 群組內任何其他訊息：若不在白名單且已超過寬限時間，先退出
+  if (groupId) {
+    const stillPending = await getGroupPermissions(groupId);
+    if (!stillPending) {
+      const left = await leaveIfGraceExpired(groupId);
+      if (left) return;
+    }
+  }
+
   // 其餘查詢指令：僅限白名單群組使用（私訊一律不回應）
   if (!groupId) return;
   const perms = await getGroupPermissions(groupId);
-  if (!perms) return;
+  if (!perms) {
+    // 不在白名單：若已超過寬限時間，直接退出群組
+    await leaveIfGraceExpired(groupId);
+    return;
+  }
+  // 已在白名單，清掉待設定記錄
+  await clearGroupPending(groupId);
 
   if (text.indexOf("功能列表") === 0) {
     if (!perms.list) return;
