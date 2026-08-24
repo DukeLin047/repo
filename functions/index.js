@@ -18,6 +18,14 @@ const LINE_API = "https://api.line.me/v2/bot/message/reply";
 const LINE_PUSH_API = "https://api.line.me/v2/bot/message/push";
 const LINE_PROFILE_API = "https://api.line.me/v2/bot";
 
+// ── AI 開放式問答（Gemini）─────────────────────────────────────
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
+const GEMINI_MODEL = "gemini-2.5-flash";
+const GEMINI_API =
+  "https://generativelanguage.googleapis.com/v1beta/models/" +
+  GEMINI_MODEL +
+  ":generateContent";
+
 function verifySignature(rawBody, signature) {
   if (!LINE_CHANNEL_SECRET) return false;
   const hash = crypto
@@ -149,6 +157,7 @@ async function getGroupPermissions(groupId) {
       feature: p.feature !== false,
       price: p.price !== false,
       list: p.list !== false,
+      ai: p.ai !== false,
       location: d.location || "",
     };
   } catch (e) {
@@ -497,6 +506,145 @@ async function listFeatureModels(keywordRaw) {
   return matches;
 }
 
+// ── AI 開放式問答輔助函式 ─────────────────────────────────────
+
+// 依問題內容，從價格表資料裡找出可以佐證回答的參考資料：
+// 1) 優先找問題裡明確提到的型號，抓出它的完整規格
+// 2) 沒提到具體型號時，依關鍵字比對品類，抓該品類前幾筆型號當參考
+async function buildAiContext(question) {
+  let doc;
+  try {
+    doc = await sampoDb.collection("priceList").doc("current").get();
+  } catch (e) {
+    console.error("buildAiContext read error:", e);
+    return "";
+  }
+  if (!doc.exists) return "";
+
+  const sheets = doc.data().sheets || [];
+  const upperQ = question.toUpperCase();
+
+  const mentioned = [];
+  sheets.forEach(function (sheet) {
+    (sheet.items || []).forEach(function (it) {
+      const pm = primaryModel(it.model);
+      if (pm && pm.length >= 4 && upperQ.indexOf(pm) !== -1) {
+        mentioned.push({ sheet: sheet.name, item: it });
+      }
+    });
+  });
+
+  if (mentioned.length > 0) {
+    return mentioned
+      .slice(0, 6)
+      .map(function (m) {
+        const specsText = (m.item.specs || [])
+          .map(function (s) {
+            return s.label + "：" + s.value;
+          })
+          .join("；");
+        return (
+          "【" + m.sheet + "】" + m.item.model +
+          (m.item.base ? "　批價：" + m.item.base : "") +
+          (specsText ? "\n規格：" + specsText : "")
+        );
+      })
+      .join("\n\n");
+  }
+
+  const CATEGORY_KEYWORDS = {
+    "影音商品": ["電視", "TV"],
+    "冰箱": ["冰箱"],
+    "洗衣機": ["洗衣機"],
+    "冷凍櫃": ["冷凍櫃", "冰櫃"],
+    "除濕機": ["除濕機"],
+  };
+
+  let targetSheet = null;
+  Object.keys(CATEGORY_KEYWORDS).some(function (name) {
+    const hit = CATEGORY_KEYWORDS[name].some(function (kw) {
+      return question.indexOf(kw) !== -1;
+    });
+    if (hit) {
+      targetSheet = sheets.find(function (s) {
+        return s.name === name;
+      });
+      return true;
+    }
+    return false;
+  });
+
+  if (targetSheet && targetSheet.items && targetSheet.items.length) {
+    return targetSheet.items
+      .slice(0, 8)
+      .map(function (it) {
+        const specsText = (it.specs || [])
+          .map(function (s) {
+            return s.label + "：" + s.value;
+          })
+          .join("；");
+        return (
+          it.model +
+          (it.base ? "　批價：" + it.base : "") +
+          (specsText ? "　" + specsText : "")
+        );
+      })
+      .join("\n");
+  }
+
+  return "";
+}
+
+// 呼叫 Gemini API 產生回答；context 為空時仍會回答，但會提醒資料不足
+async function askGemini(question, context) {
+  if (!GEMINI_API_KEY) {
+    return "AI 問答功能尚未設定完成，請聯繫管理員設定 GEMINI_API_KEY。";
+  }
+
+  const systemPrompt =
+    "你是聲寶家電的商品顧問，只根據下面提供的參考資料回答，絕對不要編造資料中沒有的規格或價格數字。" +
+    "如果參考資料不足以回答，請誠實告知使用者「資料庫裡沒有足夠的規格資訊」，並建議聯繫業務。" +
+    "回答一律使用繁體中文，控制在150字以內，語氣自然口語化，適合在LINE聊天室閱讀，不要使用markdown符號（例如*號或#號）。";
+
+  const userContent = context
+    ? "參考資料：\n" + context + "\n\n使用者問題：" + question
+    : "目前資料庫裡找不到跟這個問題直接相關的型號資料。使用者問題：" +
+      question +
+      "\n請照實告知資料不足，並建議聯繫業務取得正確資訊，不要自己編數字。";
+
+  try {
+    const res = await fetch(GEMINI_API + "?key=" + GEMINI_API_KEY, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: systemPrompt }] },
+        contents: [{ role: "user", parts: [{ text: userContent }] }],
+        generationConfig: { maxOutputTokens: 400, temperature: 0.4 },
+      }),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      console.error("Gemini API failed: " + res.status + " " + errText);
+      return "AI 目前有點忙，請稍後再試，或直接聯繫業務。";
+    }
+
+    const data = await res.json();
+    const answer =
+      data.candidates &&
+      data.candidates[0] &&
+      data.candidates[0].content &&
+      data.candidates[0].content.parts &&
+      data.candidates[0].content.parts[0] &&
+      data.candidates[0].content.parts[0].text;
+
+    return answer ? answer.trim() : "AI 沒有給出回應，換個方式問問看吧。";
+  } catch (e) {
+    console.error("askGemini error:", e);
+    return "AI 問答暫時無法使用，請稍後再試。";
+  }
+}
+
 exports.uploadAnnouncementFile = onRequest({ region: "asia-east1" }, async (req, res) => {
   res.set("Access-Control-Allow-Origin", "*");
   res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -740,7 +888,7 @@ async function handleEvent(event) {
     if (event.replyToken) {
       await replyMessage(event.replyToken, [
         textMsg(
-          "哈囉!我是聲寶庫存查詢小幫手。\n\n輸入「groupid」可以取得這個群組的 ID,提供給管理員設定白名單。\n※若 2 分鐘內未完成設定,我會自動退出群組。\n\n設定完成後可以這樣查詢:\n查QM-98MI5200（查庫存）\n查ES-B10F功能（查規格）\n查ES-B10F價錢（查批價）"
+          "哈囉!我是聲寶庫存查詢小幫手。\n\n輸入「groupid」可以取得這個群組的 ID,提供給管理員設定白名單。\n※若 2 分鐘內未完成設定,我會自動退出群組。\n\n設定完成後可以這樣查詢:\n查QM-98MI5200（查庫存）\n查ES-B10F功能（查規格）\n查ES-B10F價錢（查批價）\n問ES-B10F適合幾人家庭（AI開放式問答）"
         ),
       ]);
     }
@@ -879,6 +1027,32 @@ async function handleEvent(event) {
     });
 
     await replyMessage(event.replyToken, messages);
+    return;
+  }
+
+  // AI 開放式問答：問[問題]，例如「問ES-B10F適合幾人家庭」「問小家庭適合哪台冰箱」
+  if (text.charAt(0) === "問") {
+    if (!perms.ai) return;
+    const question = text.slice(1).trim();
+
+    if (!question) {
+      if (event.replyToken) {
+        await replyMessage(event.replyToken, [
+          textMsg("請在「問」後面接你的問題,例如:問ES-B10F適合幾人家庭"),
+        ]);
+      }
+      return;
+    }
+
+    const context = await buildAiContext(question);
+    const answer = await askGemini(question, context);
+
+    if (!event.replyToken) return;
+
+    const displayName = await getDisplayName(groupId, userId);
+    const namePrefix = displayName ? displayName + " ，你好！\n\n" : "";
+
+    await replyMessage(event.replyToken, [textMsg(namePrefix + answer)]);
     return;
   }
 
