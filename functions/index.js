@@ -20,7 +20,7 @@ const LINE_PROFILE_API = "https://api.line.me/v2/bot";
 
 // ── AI 開放式問答（Gemini）─────────────────────────────────────
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
-const GEMINI_MODEL = "gemini-2.5-flash";
+const GEMINI_MODEL = "gemini-3.6-flash";
 const GEMINI_API =
   "https://generativelanguage.googleapis.com/v1beta/models/" +
   GEMINI_MODEL +
@@ -619,7 +619,7 @@ async function askGemini(question, context) {
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: systemPrompt }] },
         contents: [{ role: "user", parts: [{ text: userContent }] }],
-        generationConfig: { maxOutputTokens: 400, temperature: 0.4 },
+        generationConfig: { maxOutputTokens: 400 },
       }),
     });
 
