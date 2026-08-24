@@ -602,9 +602,12 @@ async function askGemini(question, context) {
   }
 
   const systemPrompt =
-    "你是聲寶家電的商品顧問，只根據下面提供的參考資料回答，絕對不要編造資料中沒有的規格或價格數字。" +
-    "如果參考資料不足以回答，請誠實告知使用者「資料庫裡沒有足夠的規格資訊」，並建議聯繫業務。" +
-    "回答一律使用繁體中文，控制在150字以內，語氣自然口語化，適合在LINE聊天室閱讀，不要使用markdown符號（例如*號或#號）。";
+    "你是聲寶家電的商品顧問。你只能輸出最終要給使用者看的回答本身，" +
+    "絕對不可以輸出任何檢查清單、規則確認、內部思考痕跡、英文的自我確認文字（例如Role assumed、Strictly from context、No markdown等）。" +
+    "只根據下面提供的參考資料回答，絕對不要編造資料中沒有的規格或價格數字。" +
+    "如果參考資料不足以回答，請用一句話誠實告知使用者「資料庫裡沒有足夠的規格資訊」，並建議聯繫業務。" +
+    "回答一律使用繁體中文，控制在100字以內，語氣自然口語化，適合在LINE聊天室閱讀，不要使用markdown符號（例如*號或#號），" +
+    "只輸出答案本身，不要有任何其他說明文字。";
 
   const userContent = context
     ? "參考資料：\n" + context + "\n\n使用者問題：" + question
@@ -619,7 +622,10 @@ async function askGemini(question, context) {
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: systemPrompt }] },
         contents: [{ role: "user", parts: [{ text: userContent }] }],
-        generationConfig: { maxOutputTokens: 400 },
+        generationConfig: {
+          maxOutputTokens: 1024,
+          thinkingConfig: { thinkingLevel: "low", includeThoughts: false },
+        },
       }),
     });
 
@@ -630,15 +636,29 @@ async function askGemini(question, context) {
     }
 
     const data = await res.json();
-    const answer =
-      data.candidates &&
-      data.candidates[0] &&
-      data.candidates[0].content &&
-      data.candidates[0].content.parts &&
-      data.candidates[0].content.parts[0] &&
-      data.candidates[0].content.parts[0].text;
+    const candidate = data.candidates && data.candidates[0];
+    if (candidate && candidate.finishReason && candidate.finishReason !== "STOP") {
+      console.error("Gemini finishReason not STOP:", candidate.finishReason);
+    }
+    const parts = candidate && candidate.content && candidate.content.parts;
 
-    return answer ? answer.trim() : "AI 沒有給出回應，換個方式問問看吧。";
+    if (!parts || parts.length === 0) {
+      return "AI 沒有給出回應，換個方式問問看吧。";
+    }
+
+    // Gemini 3.x 系列會先產生內部思考草稿（part.thought === true），
+    // 真正的最終答案是沒有標記 thought 的那些片段，需要過濾掉思考內容再組合
+    const finalText = parts
+      .filter(function (p) {
+        return !p.thought && p.text;
+      })
+      .map(function (p) {
+        return p.text;
+      })
+      .join("")
+      .trim();
+
+    return finalText || "AI 沒有給出回應，換個方式問問看吧。";
   } catch (e) {
     console.error("askGemini error:", e);
     return "AI 問答暫時無法使用，請稍後再試。";
