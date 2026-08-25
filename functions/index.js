@@ -112,6 +112,7 @@ async function notifyLowStock(groupId, askerName, lowStockResults, location) {
 
 async function leaveGroup(groupId) {
   try {
+    console.log("Attempting to leave group: " + groupId);
     const res = await fetch(
       "https://api.line.me/v2/bot/group/" + groupId + "/leave",
       {
@@ -122,6 +123,8 @@ async function leaveGroup(groupId) {
     if (!res.ok) {
       const errText = await res.text();
       console.error("Leave group failed: " + res.status + " " + errText);
+    } else {
+      console.log("Successfully left group: " + groupId);
     }
   } catch (e) {
     console.error("Leave group error:", e);
@@ -173,6 +176,7 @@ async function markGroupJoined(groupId) {
     await sampoDb.collection("pendingGroups").doc(groupId).set({
       joinedAt: Date.now(),
     });
+    console.log("markGroupJoined: " + groupId + " at " + Date.now());
   } catch (e) {
     console.error("markGroupJoined error:", e);
   }
@@ -201,7 +205,13 @@ async function leaveIfGraceExpired(groupId) {
       return false;
     }
     const joinedAt = doc.data().joinedAt || 0;
-    if (Date.now() - joinedAt < JOIN_GRACE_MS) return false;
+    const elapsed = Date.now() - joinedAt;
+    if (elapsed < JOIN_GRACE_MS) return false;
+
+    console.log(
+      "Grace period expired for group " + groupId +
+      "：joinedAt=" + joinedAt + "，elapsed=" + elapsed + "ms，即將退出"
+    );
 
     await pushMessage(groupId, [
       textMsg("未在時限內完成白名單設定，我先退出囉。需要使用請再邀請我並盡快設定。"),
@@ -899,9 +909,11 @@ async function handleEvent(event) {
       const perms = await getGroupPermissions(groupId);
       if (perms) {
         // 已在白名單，清除待設定記錄
+        console.log("Bot joined group " + groupId + "（已在白名單，直接可用）");
         await clearGroupPending(groupId);
       } else {
         // 尚未設定白名單：開始計算 2 分鐘寬限時間
+        console.log("Bot joined group " + groupId + "（未在白名單，開始 2 分鐘寬限計時）");
         await markGroupJoined(groupId);
       }
     }
