@@ -91,7 +91,10 @@ async function getGroupLabel(groupId) {
   return groupId;
 }
 
+const LOW_STOCK_NOTIFY_ENABLED = false; // 暫時關閉低庫存通知（LINE 推播額度用完）
+
 async function notifyLowStock(groupId, askerName, lowStockResults, location) {
+  if (!LOW_STOCK_NOTIFY_ENABLED) return;
   if (!lowStockResults || lowStockResults.length === 0) return;
   const notifyUserId = await getNotifyUserId();
   if (!notifyUserId) return;
