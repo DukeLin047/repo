@@ -1128,7 +1128,10 @@ async function handleEvent(event) {
         ]);
       } else {
         await replyMessage(event.replyToken, [
-          textMsg(namePrefix + result.model + "\n批價：" + result.base),
+          textMsg(
+            namePrefix + result.model + "\n批價：" + result.base +
+            (result.promo ? "\n本月特促：" + result.promo : "")
+          ),
         ]);
       }
     } else {
@@ -1139,7 +1142,8 @@ async function handleEvent(event) {
         if (!result.base) {
           return result.model + "：目前沒有登記批價";
         }
-        return result.model + "　批價：" + result.base;
+        return result.model + "　批價：" + result.base +
+          (result.promo ? "　本月特促：" + result.promo : "");
       });
       await replyMessage(event.replyToken, [
         textMsg(namePrefix + lines.join("\n")),
