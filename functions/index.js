@@ -345,7 +345,89 @@ async function queryStock(modelRaw, location) {
   return results;
 }
 
+// ── 台中總貨源 ─────────────────────────────────────────────────
+// 群組的「查詢儲位」設為 TC_ALL 時，查詢會同時列出下列儲位各自的庫存。
+// 要增減儲位、調整顯示順序，只要改這一行。
+const TC_ALL_CODE = "TC_ALL";
+const TC_ALL_LOCATIONS = ["4325", "4326", "4324"];
+
+// 讀取「指定儲位」的庫存清單；該儲位沒資料就回傳空陣列。
+// 不像 getItems 會退回預設儲位，避免把 4326 的數字誤當成其他儲位的庫存。
+function getLocationItemsStrict(data, loc) {
+  const locations = (data && data.locations) || {};
+  return locations[loc] || [];
+}
+
+// 一次查多個儲位。回傳每個型號：{ model, found, per:[{loc, stock}], total }
+// 型號不在某個儲位的資料裡，代表那個儲位沒庫存，顯示 0；所有儲位都沒有才算查無此型號。
+async function queryStockMulti(modelRaw) {
+  const doc = await sampoDb.collection("inventory").doc("current").get();
+  const data = doc.exists ? doc.data() : {};
+  const models = expandSlashModel(modelRaw);
+
+  async function lookup(m) {
+    const per = [];
+    let found = false;
+    let total = 0;
+    for (let i = 0; i < TC_ALL_LOCATIONS.length; i++) {
+      const loc = TC_ALL_LOCATIONS[i];
+      const r = await queryStockSingle(m, getLocationItemsStrict(data, loc));
+      const n = r.found ? Number(r.stock) || 0 : 0;
+      if (r.found) found = true;
+      per.push({ loc: loc, stock: n });
+      total += n;
+    }
+    return { model: m, found: found, per: per, total: total };
+  }
+
+  const results = [];
+  for (let i = 0; i < models.length; i++) {
+    results.push(await lookup(models[i]));
+  }
+
+  // 同 queryStock：拆開後全部查無、且原輸入有 "/" 時，再用合併寫法找一次
+  const allNotFound = results.every(function (r) {
+    return !r.found;
+  });
+  if (allNotFound && modelRaw.indexOf("/") !== -1) {
+    const combined = await lookup(modelRaw.trim().toUpperCase());
+    if (combined.found) {
+      return models.map(function (m) {
+        return { model: m, found: true, per: combined.per, total: combined.total };
+      });
+    }
+  }
+
+  return results;
+}
+
+// 列表查詢（台中總貨源版）：每個型號一行，例如「ES-C11F：4325:3 4326:10 4324:5」
+async function listModelsMulti(keywordRaw) {
+  const keyword = normalizeModel(keywordRaw);
+  const doc = await sampoDb.collection("inventory").doc("current").get();
+  const data = doc.exists ? doc.data() : {};
+  const map = {};
+  TC_ALL_LOCATIONS.forEach(function (loc) {
+    getLocationItemsStrict(data, loc).forEach(function (it) {
+      if (normalizeModel(it.model).indexOf(keyword) === -1) return;
+      if (!map[it.model]) map[it.model] = {};
+      map[it.model][loc] = Number(it.stock) || 0;
+    });
+  });
+  return Object.keys(map)
+    .sort()
+    .map(function (model) {
+      return {
+        model: model,
+        stock: TC_ALL_LOCATIONS.map(function (loc) {
+          return loc + ":" + (map[model][loc] || 0);
+        }).join(" "),
+      };
+    });
+}
+
 async function listModels(keywordRaw, location) {
+  if (location === TC_ALL_CODE) return listModelsMulti(keywordRaw);
   const keyword = normalizeModel(keywordRaw);
   const items = await getItems(location);
   const matches = items.filter(function (it) {
@@ -1220,6 +1302,46 @@ async function handleEvent(event) {
         await replyMessage(event.replyToken, [
           textMsg("請在「查」後面接完整型號,例如:查QM-98MI5200"),
         ]);
+      }
+      return;
+    }
+
+    // 台中總貨源：同時列出多個儲位各自的庫存
+    if (perms.location === TC_ALL_CODE) {
+      const multi = await queryStockMulti(modelRaw);
+
+      if (!event.replyToken) return;
+
+      const multiName = await getDisplayName(groupId, userId);
+      const multiPrefix = multiName ? multiName + " ，你好！\n" : "";
+      const multiWarning = "\n\n※庫存10個以下需跟業務確認\n※無庫存也可以詢問業務";
+
+      const blocks = multi.map(function (r) {
+        if (!r.found) {
+          return r.model + " 查無此型號,請確認型號是否正確";
+        }
+        const lines = r.per.map(function (p) {
+          return p.loc + "：" + p.stock + "台";
+        });
+        return r.model + "\n" + lines.join("\n");
+      });
+
+      await replyMessage(event.replyToken, [
+        textMsg(multiPrefix + blocks.join("\n\n") + multiWarning),
+      ]);
+
+      // 低庫存通知（目前開關關閉）：以各儲位合計數量判斷
+      const lowMulti = multi
+        .filter(function (r) {
+          return r.found && r.total <= 10;
+        })
+        .map(function (r) {
+          return { model: r.model, stock: r.total };
+        });
+      if (lowMulti.length > 0) {
+        notifyLowStock(groupId, multiName, lowMulti, "台中總貨源").catch(function (err) {
+          console.error("notifyLowStock error:", err);
+        });
       }
       return;
     }
