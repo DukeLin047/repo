@@ -349,7 +349,7 @@ async function queryStock(modelRaw, location) {
 // 群組的「查詢儲位」設為 TC_ALL 時，查詢會同時列出下列儲位各自的庫存。
 // 要增減儲位、調整顯示順序，只要改這一行。
 const TC_ALL_CODE = "TC_ALL";
-const TC_ALL_LOCATIONS = ["4325", "4326", "4324"];
+const TC_ALL_LOCATIONS = ["4324", "4325", "4326", "4327", "4328", "4329", "4354", "4355"];
 
 // 讀取「指定儲位」的庫存清單；該儲位沒資料就回傳空陣列。
 // 不像 getItems 會退回預設儲位，避免把 4326 的數字誤當成其他儲位的庫存。
