@@ -2,7 +2,7 @@
   "name": "drink-bot-functions",
   "description": "手搖飲揪團機器人後端",
   "engines": {
-    "node": "20"
+    "node": "22"
   },
   "main": "index.js",
   "dependencies": {
