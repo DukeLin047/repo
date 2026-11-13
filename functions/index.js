@@ -436,7 +436,28 @@ async function listModels(keywordRaw, location) {
   return matches;
 }
 
-function queryFeaturesSingleFromSheets(model, sheets) {
+// 舊款（已不在最新價格表的型號）：價格表上傳時，會把被拿掉的型號「只保留功能規格」
+// 存在 priceList/current 的 retired 陣列裡（批價、特促都不保留）。
+// 這裡用跟其他查詢一致的比對方式（主型號、AU/AM 合併寫法）去找。
+function findRetiredModel(model, retired) {
+  if (!retired || retired.length === 0) return null;
+  const target = normalizeModel(model);
+  for (let i = 0; i < retired.length; i++) {
+    const r = retired[i];
+    if (normalizeModel(r.model) === target) return r;
+    const norm = primaryModel(r.model);
+    if (norm === target) return r;
+    if (norm.indexOf("/") !== -1) {
+      const hit = expandSlashModel(norm).some(function (e) {
+        return normalizeModel(e) === target;
+      });
+      if (hit) return r;
+    }
+  }
+  return null;
+}
+
+function queryFeaturesSingleFromSheets(model, sheets, retired) {
   const target = normalizeModel(model);
 
   // 先做精準比對
@@ -477,6 +498,12 @@ function queryFeaturesSingleFromSheets(model, sheets) {
     }
   }
 
+  // 最新價格表都找不到時，再找舊款（只有功能規格，會標示 retired）
+  const old = findRetiredModel(model, retired);
+  if (old) {
+    return { model: old.model, found: true, specs: old.specs || [], retired: true };
+  }
+
   return { model: model, found: false, specs: [] };
 }
 
@@ -491,18 +518,19 @@ async function queryFeatures(modelRaw) {
   }
 
   const sheets = doc.data().sheets || [];
+  const retired = doc.data().retired || [];
   const results = models.map(function (m) {
-    return queryFeaturesSingleFromSheets(m, sheets);
+    return queryFeaturesSingleFromSheets(m, sheets, retired);
   });
 
   const allNotFound = results.every(function (r) {
     return !r.found;
   });
   if (allNotFound && modelRaw.indexOf("/") !== -1) {
-    const combined = queryFeaturesSingleFromSheets(modelRaw.trim().toUpperCase(), sheets);
+    const combined = queryFeaturesSingleFromSheets(modelRaw.trim().toUpperCase(), sheets, retired);
     if (combined.found) {
       return models.map(function (m) {
-        return { model: m, found: true, specs: combined.specs };
+        return { model: m, found: true, specs: combined.specs, retired: !!combined.retired };
       });
     }
   }
@@ -565,6 +593,7 @@ async function queryPrice(modelRaw) {
   }
 
   const sheets = doc.data().sheets || [];
+  const retired = doc.data().retired || [];
   const results = models.map(function (m) {
     return queryPriceSingleFromSheets(m, sheets);
   });
@@ -581,7 +610,13 @@ async function queryPrice(modelRaw) {
     }
   }
 
-  return results;
+  // 價格表找不到、但屬於舊款：標示 retired（舊款不保留價格，回覆時會說明）
+  return results.map(function (r) {
+    if (!r.found && findRetiredModel(r.model, retired)) {
+      return { model: r.model, found: false, base: "", promo: "", retired: true };
+    }
+    return r;
+  });
 }
 
 async function listFeatureModels(keywordRaw) {
@@ -1200,7 +1235,11 @@ async function handleEvent(event) {
 
     if (results.length === 1) {
       const result = results[0];
-      if (!result.found) {
+      if (!result.found && result.retired) {
+        await replyMessage(event.replyToken, [
+          textMsg(namePrefix + result.model + " 已不在最新價格表，沒有價格資料，請洽業務"),
+        ]);
+      } else if (!result.found) {
         await replyMessage(event.replyToken, [
           textMsg(namePrefix + result.model + " 查無此型號的價格資料,請確認型號是否正確"),
         ]);
@@ -1218,6 +1257,9 @@ async function handleEvent(event) {
       }
     } else {
       const lines = results.map(function (result) {
+        if (!result.found && result.retired) {
+          return result.model + "：已不在最新價格表，沒有價格資料，請洽業務";
+        }
         if (!result.found) {
           return result.model + "：查無此型號的價格資料";
         }
@@ -1268,8 +1310,9 @@ async function handleEvent(event) {
         const lines = result.specs.map(function (sp) {
           return sp.label + "：" + sp.value;
         });
+        const retiredNote = result.retired ? "\n\n※此型號已不在最新價格表，規格僅供參考" : "";
         await replyMessage(event.replyToken, [
-          textMsg(namePrefix + result.model + " 功能規格\n\n" + lines.join("\n")),
+          textMsg(namePrefix + result.model + " 功能規格\n\n" + lines.join("\n") + retiredNote),
         ]);
       }
     } else {
@@ -1284,7 +1327,8 @@ async function handleEvent(event) {
         const lines = result.specs.map(function (sp) {
           return "　" + sp.label + "：" + sp.value;
         });
-        return result.model + " 功能規格\n" + lines.join("\n");
+        const retiredNote = result.retired ? "\n　※此型號已不在最新價格表，規格僅供參考" : "";
+        return result.model + " 功能規格\n" + lines.join("\n") + retiredNote;
       });
       await replyMessage(event.replyToken, [
         textMsg(namePrefix + blocks.join("\n\n")),
