@@ -795,6 +795,230 @@ async function askGemini(question, context) {
   }
 }
 
+// ── SAP 庫存表自動上傳（信箱 → 這裡）──────────────────────────────
+// 公司信箱收到 SAP 庫存表後，由信箱端的自動程式把 Excel 附件（base64）POST 到
+// uploadInventoryFromEmail，解析規則跟管理網頁的「每日上傳庫存表」完全一樣，
+// 寫進 Sampo 專案的 inventory/current。
+// 驗證：Authorization: Bearer <INVENTORY_UPLOAD_TOKEN>（部署環境的機密設定）
+// 防呆：檔案格式不對、解析不到資料時，一律不覆蓋現有庫存。
+const INVENTORY_UPLOAD_TOKEN = process.env.INVENTORY_UPLOAD_TOKEN || "";
+
+// ※ 以下儲位、分類規則、警示門檻要跟管理網頁 index.html 保持一致
+const INV_TARGET_LOCATIONS = [
+  { code: "4120", label: "台中已稅倉" },
+  { code: "4323", label: "台中_台中共用貨源" },
+  { code: "4324", label: "台中_台中PM備用貨源" },
+  { code: "4325", label: "台中_現銷中部一課" },
+  { code: "4326", label: "台中_現銷中部二課" },
+  { code: "4327", label: "台中_中部特銷" },
+  { code: "4328", label: "台中_台中量販" },
+  { code: "4329", label: "台中_小電_中區量倉" },
+  { code: "4348", label: "台中_現銷桃竹苗三課" },
+  { code: "4354", label: "台中_台中倉儲" },
+  { code: "4355", label: "台中_小電_中區倉儲" },
+];
+const INV_DEFAULT_LOCATION = "4326";
+
+const INV_PREFIX_RULES = [
+  { prefixes: ["EM", "QM"], category: "電視" },
+  { prefixes: ["SRF"], category: "冷凍櫃" },
+  { prefixes: ["SR"], category: "冰箱" },
+  { prefixes: ["ES"], category: "洗衣機" },
+  { prefixes: ["AW-PF", "AW-LH", "AW-RH"], category: "窗型冷氣" },
+  { prefixes: ["AU"], category: "聲寶分離式冷氣室外機" },
+  { prefixes: ["AM"], category: "聲寶分離式冷氣室內機" },
+  { prefixes: ["CH"], category: "聲寶吊隱冷氣室內機" },
+  { prefixes: ["RAU-HA"], category: "瑞智分離式冷氣外機" },
+  { prefixes: ["RAM-HA"], category: "瑞智分離式冷氣內機" },
+  { prefixes: ["RAW-HA"], category: "瑞智窗型冷氣" },
+];
+
+const INV_DEFAULT_THRESHOLD = {
+  電視: 10, 冰箱: 10, 冷凍櫃: 10, 洗衣機: 10, 窗型冷氣: 5,
+  聲寶分離式冷氣室外機: 5, 聲寶分離式冷氣室內機: 5, 聲寶吊隱冷氣室內機: 5,
+  瑞智分離式冷氣外機: 5, 瑞智分離式冷氣內機: 5, 瑞智窗型冷氣: 5,
+  小家電: 5,
+};
+
+function invGetCategory(model) {
+  const m = String(model).toUpperCase();
+  for (let i = 0; i < INV_PREFIX_RULES.length; i++) {
+    const rule = INV_PREFIX_RULES[i];
+    for (let j = 0; j < rule.prefixes.length; j++) {
+      if (m.indexOf(rule.prefixes[j]) === 0) return rule.category;
+    }
+  }
+  return "小家電"; // 不符合上述任何規則的，一律歸類為小家電
+}
+
+// 解析 SAP 庫存表（跟網頁 handleFileUpload 同一套規則）。
+// XLSX：xlsx 模組（由呼叫端傳入）；knownModels：要補成庫存 0 的完整型號清單。
+// 成功回傳 { items, locations, matchedRows }；失敗丟出 Error（message 是給人看的原因）。
+function parseSapInventory(XLSX, buffer, knownModels) {
+  const wb = XLSX.read(buffer, { type: "buffer" });
+  const sheetName = wb.SheetNames.indexOf("庫存原始檔") !== -1 ? "庫存原始檔" : wb.SheetNames[0];
+  const ws = wb.Sheets[sheetName];
+  const rows = XLSX.utils.sheet_to_json(ws, { defval: "" });
+
+  if (!rows.length) throw new Error("檔案沒有資料");
+  const first = rows[0];
+  ["儲存地點", "物料", "未限制"].forEach(function (col) {
+    if (!Object.prototype.hasOwnProperty.call(first, col)) {
+      throw new Error("找不到欄位「" + col + "」，不像是 SAP 庫存表");
+    }
+  });
+
+  const locCodes = INV_TARGET_LOCATIONS.map(function (l) { return l.code; });
+  const byLoc = {};
+  locCodes.forEach(function (c) { byLoc[c] = {}; });
+
+  let matchedRows = 0;
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const loc = String(row["儲存地點"] != null ? row["儲存地點"] : "").trim();
+    if (locCodes.indexOf(loc) === -1) continue;
+
+    const model = String(row["物料"] != null ? row["物料"] : "").trim();
+    if (!model) continue;
+
+    const category = invGetCategory(model);
+    if (!category) continue;
+
+    const qty = Number(row["未限制"] != null ? row["未限制"] : 0) || 0;
+
+    const bucket = byLoc[loc];
+    if (!bucket[model]) {
+      bucket[model] = {
+        model: model, category: category, baseStock: 0, adjustment: 0, stock: 0,
+        threshold: INV_DEFAULT_THRESHOLD[category] || 5,
+      };
+    }
+    bucket[model].baseStock += qty;
+    bucket[model].stock += qty;
+    matchedRows++;
+  }
+
+  const locations = {};
+  locCodes.forEach(function (code) {
+    const bucket = byLoc[code];
+    // 只有預設儲位補齊完整型號清單（庫存 0），其餘儲位只存實際有資料的型號，
+    // 避免儲位一多就撐爆 Firestore 單文件 1MB 上限
+    if (code === INV_DEFAULT_LOCATION) {
+      (knownModels || []).forEach(function (m) {
+        if (bucket[m]) return;
+        const cat = invGetCategory(m);
+        if (!cat) return;
+        bucket[m] = {
+          model: m, category: cat, baseStock: 0, adjustment: 0, stock: 0,
+          threshold: INV_DEFAULT_THRESHOLD[cat] || 5,
+        };
+      });
+    }
+    const arr = Object.keys(bucket).map(function (k) { return bucket[k]; });
+    arr.sort(function (a, b) {
+      if (a.category === b.category) return a.model.localeCompare(b.model, "zh-TW");
+      return a.category.localeCompare(b.category, "zh-TW");
+    });
+    locations[code] = arr;
+  });
+
+  const items = locations[INV_DEFAULT_LOCATION] || [];
+  if (!items.length || matchedRows === 0) {
+    throw new Error("在指定儲位中找不到符合分類的型號");
+  }
+  return { items: items, locations: locations, matchedRows: matchedRows };
+}
+
+function timingSafeEqualStr(a, b) {
+  const ha = crypto.createHash("sha256").update(String(a)).digest();
+  const hb = crypto.createHash("sha256").update(String(b)).digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
+
+function taipeiNowText() {
+  return new Date().toLocaleString("zh-TW", { hour12: false, timeZone: "Asia/Taipei" }).replace(/\s/g, " ");
+}
+
+exports.uploadInventoryFromEmail = onRequest(
+  { region: "asia-east1", memory: "512MiB", timeoutSeconds: 120 },
+  async (req, res) => {
+    if (req.method !== "POST") {
+      res.status(405).json({ ok: false, error: "Method not allowed" });
+      return;
+    }
+    if (!INVENTORY_UPLOAD_TOKEN) {
+      console.error("uploadInventoryFromEmail: INVENTORY_UPLOAD_TOKEN 尚未設定");
+      res.status(503).json({ ok: false, error: "server token not configured" });
+      return;
+    }
+    const authHeader = req.headers.authorization || "";
+    const token = authHeader.indexOf("Bearer ") === 0 ? authHeader.slice(7) : "";
+    if (!token || !timingSafeEqualStr(token, INVENTORY_UPLOAD_TOKEN)) {
+      res.status(401).json({ ok: false, error: "invalid token" });
+      return;
+    }
+
+    const body = req.body || {};
+    const fileName = body.fileName ? String(body.fileName) : "";
+    const dataBase64 = body.dataBase64 ? String(body.dataBase64) : "";
+    if (!dataBase64) {
+      res.status(400).json({ ok: false, error: "missing file data" });
+      return;
+    }
+    if (fileName && !/\.(xlsx|xlsm|xls)$/i.test(fileName)) {
+      res.status(400).json({ ok: false, error: "不是 Excel 檔案" });
+      return;
+    }
+    const buffer = Buffer.from(dataBase64, "base64");
+    if (buffer.length > 9 * 1024 * 1024) {
+      res.status(413).json({ ok: false, error: "檔案過大" });
+      return;
+    }
+
+    const invDoc = sampoDb.collection("inventory").doc("current");
+    const statusDoc = sampoDb.collection("inventory").doc("autoStatus");
+
+    try {
+      const XLSX = require("xlsx"); // 需要時才載入，避免影響其他功能啟動
+
+      // 完整型號清單：優先用網頁上次手動上傳時存下的 knownModels，
+      // 沒有的話退而求其次，用目前預設儲位已有的型號
+      const prevSnap = await invDoc.get();
+      const prev = prevSnap.exists ? prevSnap.data() : {};
+      const known =
+        Array.isArray(prev.knownModels) && prev.knownModels.length
+          ? prev.knownModels
+          : (prev.items || []).map(function (it) { return it.model; });
+
+      const result = parseSapInventory(XLSX, buffer, known);
+
+      await invDoc.set({
+        items: result.items,
+        locations: result.locations,
+        locationList: INV_TARGET_LOCATIONS,
+        knownModels: known,
+        updatedAt: taipeiNowText(),
+      });
+
+      const counts = {};
+      Object.keys(result.locations).forEach(function (c) { counts[c] = result.locations[c].length; });
+      await statusDoc.set({
+        ok: true, at: taipeiNowText(), fileName: fileName, matchedRows: result.matchedRows, counts: counts,
+      });
+      console.log("uploadInventoryFromEmail OK: " + fileName + "，符合列數 " + result.matchedRows);
+      res.status(200).json({ ok: true, matchedRows: result.matchedRows, counts: counts });
+    } catch (e) {
+      console.error("uploadInventoryFromEmail failed:", e);
+      try {
+        await statusDoc.set({ ok: false, at: taipeiNowText(), fileName: fileName, error: String(e && e.message ? e.message : e) });
+      } catch (e2) {
+        console.error("寫入 autoStatus 失敗:", e2);
+      }
+      res.status(422).json({ ok: false, error: String(e && e.message ? e.message : e) });
+    }
+  }
+);
+
 exports.uploadAnnouncementFile = onRequest({ region: "asia-east1" }, async (req, res) => {
   res.set("Access-Control-Allow-Origin", "*");
   res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
