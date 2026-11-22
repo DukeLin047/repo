@@ -1019,6 +1019,144 @@ exports.uploadInventoryFromEmail = onRequest(
   }
 );
 
+// ── 無貨時推薦相近機型（同分類、有庫存、只給型號與理由，不給價格）──
+const ALT_PICK_COUNT = 2;   // 推薦幾款
+const ALT_POOL_SIZE = 12;   // 先挑幾個候選交給 AI 比較
+
+// 候選庫存：群組設定的儲位；若是「台中總貨源」則各儲位加總
+async function getAltStockMap(location) {
+  const doc = await sampoDb.collection("inventory").doc("current").get();
+  const data = doc.exists ? doc.data() : {};
+  const locs = location === TC_ALL_CODE ? TC_ALL_LOCATIONS : [location || DEFAULT_LOCATION];
+  const map = {};
+  locs.forEach(function (loc) {
+    getLocationItemsStrict(data, loc).forEach(function (it) {
+      const key = normalizeModel(it.model);
+      if (!map[key]) map[key] = { model: it.model, stock: 0 };
+      map[key].stock += Number(it.stock) || 0;
+    });
+  });
+  return Object.keys(map).map(function (k) { return map[k]; });
+}
+
+function commonPrefixLen(a, b) {
+  let n = 0;
+  while (n < a.length && n < b.length && a[n] === b[n]) n++;
+  return n;
+}
+
+// 兩個機型有幾項規格（同名稱、同內容）一樣
+function specOverlap(specsA, specsB) {
+  let n = 0;
+  (specsA || []).forEach(function (sa) {
+    const hit = (specsB || []).find(function (sb) { return sb.label === sa.label; });
+    if (hit && normalizeModel(hit.value) === normalizeModel(sa.value)) n++;
+  });
+  return n;
+}
+
+// 呼叫 Gemini 取得純文字回答（不含思考過程）；失敗回傳空字串
+async function askGeminiText(systemPrompt, userContent) {
+  try {
+    const res = await fetch(GEMINI_API + "?key=" + GEMINI_API_KEY, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: systemPrompt }] },
+        contents: [{ role: "user", parts: [{ text: userContent }] }],
+        generationConfig: {
+          maxOutputTokens: 1024,
+          thinkingConfig: { thinkingLevel: "low", includeThoughts: false },
+        },
+      }),
+    });
+    if (!res.ok) {
+      console.error("Gemini alt failed: " + res.status + " " + (await res.text()));
+      return "";
+    }
+    const data = await res.json();
+    const cand = data.candidates && data.candidates[0];
+    const parts = (cand && cand.content && cand.content.parts) || [];
+    return parts
+      .filter(function (p) { return !p.thought && p.text; })
+      .map(function (p) { return p.text; })
+      .join("")
+      .trim();
+  } catch (e) {
+    console.error("askGeminiText error:", e);
+    return "";
+  }
+}
+
+// 回傳推薦文字（多行）；沒有合適候選或出錯時回傳空字串。不會丟出例外。
+async function buildAlternatives(targetModel, location) {
+  if (!GEMINI_API_KEY) return "";
+  const cat = invGetCategory(targetModel);
+  const tKey = normalizeModel(targetModel);
+
+  const stockMap = await getAltStockMap(location);
+  const pool = stockMap.filter(function (it) {
+    return it.stock > 0 && normalizeModel(it.model) !== tKey && invGetCategory(it.model) === cat;
+  });
+  if (pool.length === 0) return "";
+
+  const pdoc = await sampoDb.collection("priceList").doc("current").get();
+  const sheets = pdoc.exists ? (pdoc.data().sheets || []) : [];
+  const tSpecs = queryFeaturesSingleFromSheets(targetModel, sheets, []).specs || [];
+
+  const scored = pool.map(function (it) {
+    const specs = queryFeaturesSingleFromSheets(it.model, sheets, []).specs || [];
+    const score = commonPrefixLen(normalizeModel(it.model), tKey) + specOverlap(tSpecs, specs) * 2;
+    return { model: it.model, stock: it.stock, specs: specs, score: score };
+  });
+  scored.sort(function (a, b) { return b.score - a.score; });
+  const cands = scored.slice(0, ALT_POOL_SIZE);
+
+  const specText = function (specs) {
+    return specs.map(function (s) { return s.label + "：" + s.value; }).join("；");
+  };
+  const targetText = tSpecs.length
+    ? specText(tSpecs)
+    : "（價格表沒有這個型號的規格資料，請只依型號相近判斷）";
+  const candText = cands
+    .map(function (c) { return c.model + "｜" + (c.specs.length ? specText(c.specs) : "（沒有規格資料）"); })
+    .join("\n");
+
+  const system =
+    "你是聲寶家電的商品顧問。使用者查詢的機型目前沒有庫存。" +
+    "請只從「候選機型」清單中挑選 " + ALT_PICK_COUNT + " 款最接近的替代品，依功能與型號相近程度判斷。" +
+    "嚴格規定：只能使用候選清單裡出現的型號，不可自行發明型號；不可提到任何價格或金額；" +
+    "每款一行，格式為「型號｜一句話理由（30字內）」，不要編號、不要markdown符號、不要其他說明文字。" +
+    "如果沒有合適的替代品，只輸出 NONE。";
+  const user =
+    "查詢機型：" + targetModel + "\n查詢機型規格：" + targetText +
+    "\n\n候選機型（型號｜規格）：\n" + candText;
+
+  const raw = await askGeminiText(system, user);
+  if (!raw || /^NONE/i.test(raw.trim())) return "";
+
+  const picks = [];
+  raw.split("\n").forEach(function (line) {
+    const parts = line.split("｜");
+    if (parts.length < 2) return;
+    const pm = parts[0].replace(/^[\s\-\d\.、]+/, "").trim();
+    const c = cands.find(function (x) { return normalizeModel(x.model) === normalizeModel(pm); });
+    if (!c) return;                                   // 不在候選清單 → 丟掉（防止編造型號）
+    if (picks.some(function (p) { return p.c === c; })) return;
+    const reason = parts.slice(1).join("｜").trim();
+    if (/元|\$|價格|批價|特促/.test(reason)) return;  // 理由裡出現價格 → 丟掉
+    picks.push({ c: c, reason: reason });
+  });
+
+  const top = picks.slice(0, ALT_PICK_COUNT);
+  if (top.length === 0) return "";
+  return top
+    .map(function (p, i) {
+      return (i + 1) + ". " + p.c.model + "（目前 " + p.c.stock + " 台）\n　" + p.reason;
+    })
+    .join("\n");
+}
+
 exports.uploadAnnouncementFile = onRequest({ region: "asia-east1" }, async (req, res) => {
   res.set("Access-Control-Allow-Origin", "*");
   res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -1594,8 +1732,17 @@ async function handleEvent(event) {
         return r.model + "\n" + lines.join("\n");
       });
 
+      let multiAlt = "";
+      if (multi.length === 1 && multi[0].found && multi[0].total === 0) {
+        const a = await buildAlternatives(multi[0].model, perms.location).catch(function (e) {
+          console.error("buildAlternatives error:", e);
+          return "";
+        });
+        if (a) multiAlt = "\n\n🔁 相近推薦（同分類、目前有庫存）：\n" + a;
+      }
+
       await replyMessage(event.replyToken, [
-        textMsg(multiPrefix + blocks.join("\n\n") + multiWarning),
+        textMsg(multiPrefix + blocks.join("\n\n") + multiAlt + multiWarning),
       ]);
 
       // 低庫存通知（目前開關關閉）：以各儲位合計數量判斷
@@ -1635,9 +1782,14 @@ async function handleEvent(event) {
           ),
         ]);
       } else {
+        const alt = await buildAlternatives(result.model, perms.location).catch(function (e) {
+          console.error("buildAlternatives error:", e);
+          return "";
+        });
+        const altText = alt ? "\n\n🔁 相近推薦（同分類、目前有庫存）：\n" + alt : "";
         await replyMessage(event.replyToken, [
           textMsg(
-            namePrefix + result.model + " 目前沒貨\n庫存量:0" + warning
+            namePrefix + result.model + " 目前沒貨\n庫存量:0" + altText + warning
           ),
         ]);
       }
