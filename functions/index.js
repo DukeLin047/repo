@@ -1019,9 +1019,79 @@ exports.uploadInventoryFromEmail = onRequest(
   }
 );
 
-// ── 無貨時推薦相近機型（同分類、有庫存、只給型號與理由，不給價格）──
+// ── 無貨時推薦相近機型（同分類、有庫存、依各類優先順序排序，只給型號與理由，不給價格）──
 const ALT_PICK_COUNT = 2;   // 推薦幾款
-const ALT_POOL_SIZE = 12;   // 先挑幾個候選交給 AI 比較
+const ALT_POOL_SIZE = 12;   // 排序後取前幾名交給 AI 挑
+const ALT_BIG = 1e9;        // 沒有數字時的排序值（排在最後）
+
+// 價格表分頁 → 分類（分類以價格表為準，因為「除濕機」在型號規則裡沒有前綴）
+const SHEET_TO_CAT = {
+  "影音商品": "電視", "冰箱": "冰箱", "冷凍櫃": "冷凍櫃",
+  "洗乾衣機": "洗衣機", "除濕機": "除濕機", "小家電": "小家電",
+};
+// 各分類的優先順序（送給 AI 的指示，也決定程式排序的第一關）
+const CAT_PRIORITY_TEXT = {
+  "電視": "尺寸（吋數）最重要，其次是功能，最後才考慮價格",
+  "冰箱": "公升數（容量）最重要，其次是功能，最後才考慮價格",
+  "冷凍櫃": "公升數（容量）最重要，其次是功能，最後才考慮價格",
+  "洗衣機": "公斤數最重要，其次是功能，最後才考慮價格",
+  "除濕機": "功能最重要，其次才考慮價格",
+  "小家電": "型號最重要（越像越好），其次是功能，最後才考慮價格",
+};
+const CAT_SIZE_UNIT = { "電視": "吋", "冰箱": "L", "冷凍櫃": "L", "洗衣機": "公斤" };
+
+// 機型所屬分類：先看它在價格表哪個分頁，找不到才用型號前綴判斷
+function sheetCategoryOf(model, sheets) {
+  const pm = primaryModel(model);
+  for (let i = 0; i < sheets.length; i++) {
+    const cat = SHEET_TO_CAT[sheets[i].name];
+    if (!cat) continue;
+    if ((sheets[i].items || []).some(function (it) { return primaryModel(it.model) === pm; })) return cat;
+  }
+  return invGetCategory(model);
+}
+
+// 從機型或規格抓出主要數字：電視抓型號裡的吋數，冰箱/冷凍櫃抓容量 L，洗衣機抓公斤
+function sizeOf(cat, model, specs) {
+  if (cat === "電視") {
+    const m = primaryModel(model).match(/^[A-Z]+-(\d{2,3})/);
+    return m ? parseFloat(m[1]) : null;
+  }
+  if (cat === "冰箱" || cat === "冷凍櫃") {
+    const sp = (specs || []).find(function (s) { return /容量/.test(s.label); });
+    const m = sp && String(sp.value).match(/(\d+(?:\.\d+)?)\s*L/i);
+    return m ? parseFloat(m[1]) : null;
+  }
+  if (cat === "洗衣機") {
+    const sp = (specs || []).find(function (s) { return /公斤/.test(s.label); });
+    const m = sp && String(sp.value).match(/(\d+(?:\.\d+)?)/);
+    return m ? parseFloat(m[1]) : null;
+  }
+  return null;
+}
+
+// 價格（只用來排序，不會顯示）
+function priceNum(model, sheets) {
+  const base = queryPriceSingleFromSheets(model, sheets).base;
+  const m = String(base || "").replace(/,/g, "").match(/\d+(?:\.\d+)?/);
+  return m ? parseFloat(m[0]) : null;
+}
+
+// 功能相近度：兩邊規格文字拆成詞後，共同出現的詞越多越相近
+function featureTokens(specs) {
+  const set = {};
+  (specs || []).forEach(function (s) {
+    String(s.value).split(/[、，,；;\s\/()（）+]+/).forEach(function (t) {
+      t = t.trim();
+      if (t.length >= 2) set[t] = true;
+    });
+  });
+  return set;
+}
+function featureScore(specsA, specsB) {
+  const ta = featureTokens(specsA), tb = featureTokens(specsB);
+  return Object.keys(ta).filter(function (t) { return tb[t]; }).length;
+}
 
 // 候選庫存：群組設定的儲位；若是「台中總貨源」則各儲位加總
 async function getAltStockMap(location) {
@@ -1042,16 +1112,6 @@ async function getAltStockMap(location) {
 function commonPrefixLen(a, b) {
   let n = 0;
   while (n < a.length && n < b.length && a[n] === b[n]) n++;
-  return n;
-}
-
-// 兩個機型有幾項規格（同名稱、同內容）一樣
-function specOverlap(specsA, specsB) {
-  let n = 0;
-  (specsA || []).forEach(function (sa) {
-    const hit = (specsB || []).find(function (sb) { return sb.label === sa.label; });
-    if (hit && normalizeModel(hit.value) === normalizeModel(sa.value)) n++;
-  });
   return n;
 }
 
@@ -1088,67 +1148,104 @@ async function askGeminiText(systemPrompt, userContent) {
   }
 }
 
-// 回傳推薦文字（多行）；沒有合適候選或出錯時回傳空字串。不會丟出例外。
+// 依分類優先順序排序候選（程式決定順序，AI 不改順序）
+function rankCandidates(cat, tKey, tSpecs, tNum, tPrice, pool, sheets) {
+  const usesSize = (cat in CAT_SIZE_UNIT) && tNum !== null;
+  const scored = pool.map(function (it) {
+    const specs = queryFeaturesSingleFromSheets(it.model, sheets, []).specs || [];
+    const num = (cat in CAT_SIZE_UNIT) ? sizeOf(cat, it.model, specs) : null;
+    const price = priceNum(it.model, sheets);
+    return {
+      model: it.model,
+      stock: it.stock,
+      specs: specs,
+      num: num,
+      numDiff: (usesSize && num !== null) ? Math.abs(num - tNum) : ALT_BIG,
+      modelSim: commonPrefixLen(normalizeModel(it.model), tKey),
+      feat: featureScore(tSpecs, specs),
+      priceGap: (tPrice !== null && price !== null) ? Math.abs(price - tPrice) : ALT_BIG,
+    };
+  });
+  const byPrice = function (a, b) { return a.priceGap - b.priceGap; };
+  if (cat === "小家電") {
+    scored.sort(function (a, b) { return (b.modelSim - a.modelSim) || (b.feat - a.feat) || byPrice(a, b); });
+  } else if (usesSize) {
+    scored.sort(function (a, b) { return (a.numDiff - b.numDiff) || (b.feat - a.feat) || byPrice(a, b); });
+  } else {
+    scored.sort(function (a, b) { return (b.feat - a.feat) || (b.modelSim - a.modelSim) || byPrice(a, b); });
+  }
+  return scored;
+}
+
+// 回傳推薦文字（多行）；沒有候選、AI 判定沒有合適的、或沒設定金鑰時回傳空字串。不會丟出例外。
 async function buildAlternatives(targetModel, location) {
   if (!GEMINI_API_KEY) return "";
-  const cat = invGetCategory(targetModel);
+
+  const pdoc = await sampoDb.collection("priceList").doc("current").get();
+  const sheets = pdoc.exists ? (pdoc.data().sheets || []) : [];
+  const cat = sheetCategoryOf(targetModel, sheets);
   const tKey = normalizeModel(targetModel);
 
   const stockMap = await getAltStockMap(location);
   const pool = stockMap.filter(function (it) {
-    return it.stock > 0 && normalizeModel(it.model) !== tKey && invGetCategory(it.model) === cat;
+    return it.stock > 0 && normalizeModel(it.model) !== tKey && sheetCategoryOf(it.model, sheets) === cat;
   });
   if (pool.length === 0) return "";
 
-  const pdoc = await sampoDb.collection("priceList").doc("current").get();
-  const sheets = pdoc.exists ? (pdoc.data().sheets || []) : [];
   const tSpecs = queryFeaturesSingleFromSheets(targetModel, sheets, []).specs || [];
-
-  const scored = pool.map(function (it) {
-    const specs = queryFeaturesSingleFromSheets(it.model, sheets, []).specs || [];
-    const score = commonPrefixLen(normalizeModel(it.model), tKey) + specOverlap(tSpecs, specs) * 2;
-    return { model: it.model, stock: it.stock, specs: specs, score: score };
-  });
-  scored.sort(function (a, b) { return b.score - a.score; });
-  const cands = scored.slice(0, ALT_POOL_SIZE);
+  const tNum = (cat in CAT_SIZE_UNIT) ? sizeOf(cat, targetModel, tSpecs) : null;
+  const tPrice = priceNum(targetModel, sheets);
+  const cands = rankCandidates(cat, tKey, tSpecs, tNum, tPrice, pool, sheets).slice(0, ALT_POOL_SIZE);
 
   const specText = function (specs) {
     return specs.map(function (s) { return s.label + "：" + s.value; }).join("；");
   };
-  const targetText = tSpecs.length
-    ? specText(tSpecs)
-    : "（價格表沒有這個型號的規格資料，請只依型號相近判斷）";
-  const candText = cands
-    .map(function (c) { return c.model + "｜" + (c.specs.length ? specText(c.specs) : "（沒有規格資料）"); })
+  const numNote = function (num) {
+    return (cat in CAT_SIZE_UNIT && num !== null) ? "（" + CAT_SIZE_UNIT[cat] + "：" + num + "）" : "";
+  };
+  const targetText =
+    numNote(tNum) + (tSpecs.length ? specText(tSpecs) : "（價格表沒有這個型號的規格資料）");
+  const picked = cands.slice(0, ALT_PICK_COUNT);  // 排序前幾名 = 推薦結果，AI 不能改順序
+  const candText = picked
+    .map(function (c, i) {
+      return (i + 1) + ". " + c.model + numNote(c.num) + "｜" + (c.specs.length ? specText(c.specs) : "（沒有規格資料）");
+    })
     .join("\n");
 
+  const priority = CAT_PRIORITY_TEXT[cat] || "型號與功能相近最重要";
   const system =
     "你是聲寶家電的商品顧問。使用者查詢的機型目前沒有庫存。" +
-    "請只從「候選機型」清單中挑選 " + ALT_PICK_COUNT + " 款最接近的替代品，依功能與型號相近程度判斷。" +
-    "嚴格規定：只能使用候選清單裡出現的型號，不可自行發明型號；不可提到任何價格或金額；" +
-    "每款一行，格式為「型號｜一句話理由（30字內）」，不要編號、不要markdown符號、不要其他說明文字。" +
-    "如果沒有合適的替代品，只輸出 NONE。";
+    "判斷相近程度的優先順序：" + priority + "。" +
+    "下面的推薦機型已依此順序排好，你的工作是為每一款寫一句推薦理由（說明哪裡接近），不要改變順序或增減機型。" +
+    "嚴格規定：不可提到任何價格或金額；每款一行，格式為「型號｜一句話理由（30字內）」；" +
+    "不要編號、不要markdown符號、不要其他說明文字。如果這些機型都明顯不適合，只輸出 NONE。";
   const user =
     "查詢機型：" + targetModel + "\n查詢機型規格：" + targetText +
     "\n\n候選機型（型號｜規格）：\n" + candText;
 
   const raw = await askGeminiText(system, user);
-  if (!raw || /^NONE/i.test(raw.trim())) return "";
+  if (raw && /^NONE/i.test(raw.trim())) return "";
 
-  const picks = [];
+  // 解析 AI 的理由；只接受推薦清單內的型號，理由不可含價格
+  const reasons = {};
   raw.split("\n").forEach(function (line) {
     const parts = line.split("｜");
     if (parts.length < 2) return;
     const pm = parts[0].replace(/^[\s\-\d\.、]+/, "").trim();
-    const c = cands.find(function (x) { return normalizeModel(x.model) === normalizeModel(pm); });
-    if (!c) return;                                   // 不在候選清單 → 丟掉（防止編造型號）
-    if (picks.some(function (p) { return p.c === c; })) return;
+    const c = picked.find(function (x) { return normalizeModel(x.model) === normalizeModel(pm); });
+    if (!c) return;
     const reason = parts.slice(1).join("｜").trim();
-    if (/元|\$|價格|批價|特促/.test(reason)) return;  // 理由裡出現價格 → 丟掉
-    picks.push({ c: c, reason: reason });
+    if (/元|\$|價格|批價|特促/.test(reason)) return;
+    reasons[c.model] = reason;
   });
 
-  const top = picks.slice(0, ALT_PICK_COUNT);
+  // 沒有 AI 理由（失敗或格式不對）時，由程式產生理由
+  const top = picked.map(function (c) {
+    const fallback = (cat in CAT_SIZE_UNIT && c.num !== null && tNum !== null)
+      ? CAT_SIZE_UNIT[cat] + "相近（" + c.num + "）"
+      : "型號與功能相近";
+    return { c: c, reason: reasons[c.model] || fallback };
+  });
   if (top.length === 0) return "";
   return top
     .map(function (p, i) {
