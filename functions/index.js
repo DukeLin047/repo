@@ -1097,7 +1097,7 @@ function featureScore(specsA, specsB) {
 async function getAltStockMap(location) {
   const doc = await sampoDb.collection("inventory").doc("current").get();
   const data = doc.exists ? doc.data() : {};
-  const locs = location === TC_ALL_CODE ? TC_ALL_LOCATIONS : [location || DEFAULT_LOCATION];
+  const locs = location === TC_ALL_CODE ? TC_ALL_LOCATIONS : [location || INV_DEFAULT_LOCATION];
   const map = {};
   locs.forEach(function (loc) {
     getLocationItemsStrict(data, loc).forEach(function (it) {
