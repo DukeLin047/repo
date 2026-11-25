@@ -1254,6 +1254,96 @@ async function buildAlternatives(targetModel, location) {
     .join("\n");
 }
 
+// ── 對外庫存 API（金鑰 + 儲位權限）──────────────────────────────
+// 金鑰存在 Firestore apiKeys 集合，只存 SHA-256 雜湊，不存明文。
+// 每把金鑰的 locations 欄位是允許的儲位清單，伺服器端強制檢查，不允許的儲位直接回 403。
+function hashApiKey(token) {
+  return crypto.createHash("sha256").update(String(token)).digest("hex");
+}
+
+async function findApiKeyDoc(token) {
+  const snap = await sampoDb.collection("apiKeys").where("keyHash", "==", hashApiKey(token)).limit(1).get();
+  if (snap.empty) return null;
+  return { id: snap.docs[0].id, data: snap.docs[0].data() };
+}
+
+// 只回傳功能規格（label：value），絕不包含價格欄位
+function apiFeatureText(specs) {
+  return (specs || []).map(function (s) { return s.label + "：" + s.value; }).join("；");
+}
+
+exports.inventoryApi = onRequest({ region: "asia-east1" }, async (req, res) => {
+  if (req.method !== "GET") {
+    res.status(405).json({ ok: false, error: "Method not allowed，請使用 GET" });
+    return;
+  }
+
+  const authHeader = req.headers.authorization || "";
+  const token = authHeader.indexOf("Bearer ") === 0 ? authHeader.slice(7).trim() : "";
+  if (!token) {
+    res.status(401).json({ ok: false, error: "缺少金鑰，請在 Authorization 標頭帶入 Bearer 金鑰" });
+    return;
+  }
+
+  let found;
+  try {
+    found = await findApiKeyDoc(token);
+  } catch (e) {
+    console.error("inventoryApi key lookup error:", e);
+    res.status(500).json({ ok: false, error: "伺服器錯誤" });
+    return;
+  }
+  if (!found || found.data.enabled !== true) {
+    res.status(401).json({ ok: false, error: "金鑰無效或已停用" });
+    return;
+  }
+
+  const allowed = Array.isArray(found.data.locations) ? found.data.locations : [];
+  const want = req.query.location ? String(req.query.location).trim() : "";
+  if (want && allowed.indexOf(want) === -1) {
+    res.status(403).json({ ok: false, error: "此金鑰沒有儲位 " + want + " 的權限" });
+    return;
+  }
+  const targets = want ? [want] : allowed;
+
+  try {
+    const invDoc = await sampoDb.collection("inventory").doc("current").get();
+    const inv = invDoc.exists ? invDoc.data() : {};
+    const pdoc = await sampoDb.collection("priceList").doc("current").get();
+    const sheets = pdoc.exists ? (pdoc.data().sheets || []) : [];
+
+    const byLoc = {};
+    targets.forEach(function (loc) {
+      byLoc[loc] = getLocationItemsStrict(inv, loc).map(function (it) {
+        const specs = queryFeaturesSingleFromSheets(it.model, sheets, []).specs || [];
+        return {
+          model: it.model,
+          category: it.category || invGetCategory(it.model),
+          stock: Number(it.stock) || 0,
+          features: apiFeatureText(specs),
+        };
+      });
+    });
+
+    // 最後使用時間（盡力而為，失敗不影響回應）
+    sampoDb.collection("apiKeys").doc(found.id)
+      .update({ lastUsedAt: taipeiNowText() })
+      .catch(function () {});
+
+    const body = { ok: true, updatedAt: inv.updatedAt || null };
+    if (want) {
+      body.location = want;
+      body.items = byLoc[want] || [];
+    } else {
+      body.locations = byLoc;
+    }
+    res.status(200).json(body);
+  } catch (e) {
+    console.error("inventoryApi error:", e);
+    res.status(500).json({ ok: false, error: "讀取庫存失敗" });
+  }
+});
+
 exports.uploadAnnouncementFile = onRequest({ region: "asia-east1" }, async (req, res) => {
   res.set("Access-Control-Allow-Origin", "*");
   res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
