@@ -1273,6 +1273,14 @@ function apiFeatureText(specs) {
 }
 
 exports.inventoryApi = onRequest({ region: "asia-east1" }, async (req, res) => {
+  // CORS：允許網頁跨網域呼叫（金鑰在標頭，不依賴 Cookie，所以安全）
+  res.set("Access-Control-Allow-Origin", "*");
+  res.set("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.set("Access-Control-Allow-Headers", "Authorization, Content-Type");
+  if (req.method === "OPTIONS") {
+    res.status(204).send("");
+    return;
+  }
   if (req.method !== "GET") {
     res.status(405).json({ ok: false, error: "Method not allowed，請使用 GET" });
     return;
